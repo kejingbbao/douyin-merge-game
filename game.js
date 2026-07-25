@@ -100,6 +100,7 @@ let ladderHistError = null;    // 战绩请求失败信息
 let ladderScroll = 0;          // 战绩滚动偏移（像素）
 let lastMoveYL = 0;            // 战绩列表滑动上一帧 Y
 let moveSteps = 0;             // 本局步数（用于天梯匹配上报）
+let ladderSeq = 0;             // 天梯请求序号：重开新局时自增，使进行中的旧回调失效（竞态守门）
 
 // 对「uid|score|ts」做 HMAC 签名（仅当配置了 RANK_SECRET 时）
 function signScore(uid, score, ts) {
@@ -131,11 +132,14 @@ function submitLadder(st) {
     const ts = Math.floor(Date.now() / 1000);
     const score = Math.floor(Number(st.score) || 0);
     const steps = Math.floor(Number(moveSteps) || 0);
+    const seq = ++ladderSeq; // 本次天梯请求序号，用于竞态守门
     ladderLoading = true;
     ladderError = null;
     Ladder.fetchLadderMatch({
       uid: rankUid, name: rankSelfName, score, steps, boardSummary: st.grid, ts,
     }).then((resp) => {
+      // 竞态守门：期间若已重开新局（ladderSeq 变化），丢弃本次回调结果，不覆盖新局。
+      if (seq !== ladderSeq) { ladderLoading = false; return; }
       if (resp && resp.code === 0 && resp.data) {
         ladderMatch = resp.data;
         ladderError = null;
@@ -145,6 +149,7 @@ function submitLadder(st) {
       }
       ladderLoading = false;
     }).catch(() => {
+      if (seq !== ladderSeq) { ladderLoading = false; return; }
       ladderError = '天梯请求失败，请检查网络';
       ladderLoading = false;
     });
@@ -342,7 +347,16 @@ function hideBanner() {
 }
 
 function watchRewardedThenRestart() {
-  const reset = () => { state = Logic.initGame(); screen = 'play'; moveSteps = 0; hideBanner(); };
+  const reset = () => {
+    state = Logic.initGame();
+    screen = 'play';
+    moveSteps = 0;
+    hideBanner();
+    ladderSeq++;            // 使任何进行中的旧天梯回调失效（竞态守门）
+    ladderLoading = false;  // 一并清理天梯结算卡状态
+    ladderMatch = null;
+    ladderError = null;
+  };
   if (!isTT || !REWARD_AD_ID) { reset(); return; }
   try {
     const ad = tt.createRewardedVideoAd({ adUnitId: REWARD_AD_ID });
@@ -356,6 +370,10 @@ function restart() {
   screen = 'play';
   moveSteps = 0;
   hideBanner();
+  ladderSeq++;            // 使任何进行中的旧天梯回调失效（竞态守门）
+  ladderLoading = false;  // 一并清理天梯结算卡状态
+  ladderMatch = null;
+  ladderError = null;
 }
 
 // ---------- 输入 ----------

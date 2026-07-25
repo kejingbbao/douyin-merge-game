@@ -198,9 +198,10 @@ async function testParamValidation() {
   r = await runMatch(svc, { uid: 'u1', name: 'X', score: 100, steps: 5, ts, sig: 'deadbeef' });
   ok(r.code === 2, '⑤ sig 错 → code 2，实际 ' + r.code);
 
-  // 缺 score：规范「缺 score → code 1」要求必填校验。
-  // 注意：源码对 score 缺失容错为 0（与 /api/score 一致，无法区分“缺失”与“显式 0”），
-  // 故此处按规范预期 code 1。若失败，说明 /api/ladder/match 未对缺失 score 做强校验（见报告：低危源码缺陷）。
+  // 缺 score（undefined）：命中 match() 第 81 行 `if (score == null)` → code 1，正确。
+  // 注意：真正未覆盖的盲区是非数字【字符串】（如 "abc" / "123abc" / ""），
+  // 它们在第 82 行被 `Math.floor(Number(score) || 0)` 静默 coerce 成 0，
+  // 导致第 84 行的 !Number.isFinite(sc) 校验成为死代码，应拒未拒（见 test/ladder-nan.test.js：当前 FAIL，待 engineer 修复）。
   r = await runMatch(svc, { uid: 'u1', name: 'X', steps: 5, ts, sig: sign('u1', 0, 5, ts) });
   ok(r.code === 1, '⑤ 缺 score → code 1（规范：必填字段缺失应拒绝），实际 ' + r.code);
 }

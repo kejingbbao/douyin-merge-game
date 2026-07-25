@@ -79,15 +79,20 @@ class LadderService {
     // 必填字段 score 缺失：按架构约定（docs/system_design.md §7）返回 code 1（PARAM）。
     // 用 == null 而非 falsy，以保留 score=0 这一合法分数值。
     if (score == null) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score required' });
-    const sc = Math.floor(Number(score) || 0);
-    // Number(score) 转换后若为 NaN（如非数字字符串），同样视为缺失并按 code 1 拒绝
-    if (!Number.isFinite(sc)) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score required' });
-    const st = Math.floor(Number(steps) || 0);
+    // score 必须是有限数值（必填数值）。字符串（含 ''/'abc'/'123abc'）一律视为缺失，
+    // 禁止被 Number() 静默 coerce 成 0 后当合法 score=0 落库（详见 test/ladder-nan.test.js）。
+    // 注意：Number('') === 0（非 NaN），故不能仅靠 !Number.isFinite 捕获空串，需显式按类型拒绝。
+    if (typeof score !== 'number' || !Number.isFinite(score)) {
+      return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score required' });
+    }
+    const sc = Math.floor(score);
+    // steps 同理：必须为有限数值，非数字字符串一律拒绝（与 score 保持一致）。
+    if (typeof steps !== 'number' || !Number.isFinite(steps) || steps < 0) {
+      return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'steps invalid' });
+    }
+    const st = Math.floor(steps);
     if (sc < 0 || sc > this.maxScore) {
       return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score out of range' });
-    }
-    if (!Number.isFinite(st) || st < 0) {
-      return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'steps invalid' });
     }
     if (ts == null) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'ts required' });
 

@@ -143,8 +143,8 @@ function openRank() {
 }
 
 function rankBtnRect() {
-  // 左上角，避开抖音小游戏右上角的系统胶囊按钮（菜单/关闭）
-  return { x: 12, y: 16, w: 74, h: 30 };
+  // 左上角（避开右上角系统胶囊），y 与排行榜面板顶边(p.y=56)平行对齐，不贴顶
+  return { x: 12, y: 56, w: 74, h: 30 };
 }
 function rankPanelRect() {
   return { x: PAD, y: 56, w: W - PAD * 2, h: H - 56 - 24 };

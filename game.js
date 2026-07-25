@@ -402,6 +402,12 @@ tt.onTouchEnd((e) => {
   if (screen === 'ladder') {
     const dx = t.clientX - sx, dy = t.clientY - sy;
     if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+      // 兜底态：screen==='ladder' 但天梯结算数据缺失且非加载/报错（空 match 黑屏场景）。
+      // 此时结算卡无有效内容，点击任意处直接重开，绝不让玩家卡在空黑屏。
+      if (!ladderMatch && !ladderLoading && !ladderError) {
+        restart();
+        return;
+      }
       // 关闭 × 优先（错误态也不能吞掉关闭）
       const cr = Ladder.ladderCloseRect(L);
       if (hit(cr, t)) { screen = 'play'; return; }
@@ -879,6 +885,7 @@ function drawLadder() {
     loading: ladderLoading,
     error: ladderError,
     selfRank: (rankData && rankData.selfRank) || 0,
+    score: state.score,
   });
 }
 

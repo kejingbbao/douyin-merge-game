@@ -201,7 +201,14 @@ function drawLadderCard(ctx, L, match, opts) {
     ctx.fillText('点击任意处重试', L.W / 2, p.y + p.h / 2 + 16);
     return;
   }
-  if (!match) return;
+  // 兜底：天梯结算数据缺失或结构异常（网络/后端返回不符、空数据、缺 opponent 等）。
+  // 绝不允许裸 return 留黑屏——必须给出明确的结束提示与重开入口，
+  // 保证玩家满格后一定能看到提示并重新开局。
+  const canRenderMatch = match && match.opponent && typeof match.myScore === 'number';
+  if (!canRenderMatch) {
+    drawLadderFallback(ctx, L, opts);
+    return;
+  }
 
   // 标题
   ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -249,6 +256,34 @@ function drawLadderCard(ctx, L, match, opts) {
   ctx.fillStyle = '#8f7a66'; rr(ctx, rb.x, rb.y, rb.w, rb.h, rb.h / 2); ctx.fill();
   ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif';
   ctx.fillText('看战绩', rb.x + rb.w / 2, rb.y + rb.h / 2);
+}
+
+// 天梯结算卡的兜底渲染：当 match 缺失或结构异常（空数据/网络超时/后端返回不符）时调用。
+// 此时面板与 × 已由 drawLadderCard 先行绘制，这里只补充「结束提示 + 重开入口」，
+// 确保玩家满格后绝不卡在空黑屏，且可通过点击任意处重开（见 game.js 触摸兜底分支）。
+function drawLadderFallback(ctx, L, opts) {
+  opts = opts || {};
+  const p = ladderPanelRect(L);
+  const cy = p.y + p.h / 2;
+  // 标题：游戏结束
+  ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 22px sans-serif';
+  ctx.fillText('游戏结束', L.W / 2, cy - 56);
+  // 本局得分（由 game.js 透传，缺省 0）
+  const score = (opts.score != null) ? opts.score : 0;
+  ctx.fillStyle = '#5b4a1f'; ctx.font = 'bold 18px sans-serif';
+  ctx.fillText('本局得分：' + score, L.W / 2, cy - 24);
+  // 说明
+  ctx.fillStyle = '#776e65'; ctx.font = '15px sans-serif';
+  ctx.fillText('天梯结算暂不可用', L.W / 2, cy + 4);
+  // 个人排名（若已拉取到有效名次）
+  if (opts.selfRank && Number(opts.selfRank) > 0) {
+    ctx.fillStyle = '#edc22e'; ctx.font = '15px sans-serif';
+    ctx.fillText('你的排名：第 ' + opts.selfRank + ' 位', L.W / 2, cy + 30);
+  }
+  // 重开提示（点击任意处 → restart，见 game.js）
+  ctx.fillStyle = '#8f7a66'; ctx.font = 'bold 16px sans-serif';
+  ctx.fillText('点击任意处再来一局', L.W / 2, cy + 56);
 }
 
 function formatTs(ts) {

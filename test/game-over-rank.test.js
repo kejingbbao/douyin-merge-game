@@ -87,6 +87,14 @@ function ok(c, m) { if (c) pass++; else { fail++; console.error('FAIL: ' + m); }
   await new Promise((r) => setTimeout(r, 0));
   ok(T.getScreen() === 'play', '天梯异步回调后 screen 仍应为 play（screen 不丢）');
 
+  // (e) 房间入口按钮：点击应进入 room 界面（修复 Bug2：房间按钮此前仅绘制、无点击处理）
+  const rm = T.roomEntryBtnRect();
+  touchStart({ touches: [{ clientX: rm.x + rm.w / 2, clientY: rm.y + rm.h / 2 }] });
+  touchEnd({ changedTouches: [{ clientX: rm.x + rm.w / 2, clientY: rm.y + rm.h / 2 }] });
+  ok(T.getScreen() === 'room', '点击房间按钮应进入 room 界面（Bug2 修复）');
+  T.roomExit();
+  ok(T.getScreen() === 'play', '退出房间应回到 play 界面');
+
   console.log('game-over-rank.test: pass=' + pass + ' fail=' + fail);
   process.exit(fail === 0 ? 0 : 1);
 })();

@@ -398,19 +398,22 @@ function createUpstashStore() {
   const META = 'rank:meta';
 
   // 提交单条 Redis 命令。
-  // 采用 Upstash 官方推荐的「POST body 命令」方式：
-  //   - 命令参数全部放进请求体 { command: [...] }（原始字符串，不做 encodeURIComponent）
-  //   - URL 仅用 base（UPSTASH_REDIS_REST_URL），不在路径里拼接命令
-  // 这样可彻底消除「命令拼在 URL 路径里导致的 400 input length too long」问题
-  // （房间 JSON / boardSummary 等大值写入时尤其容易触顶 URL 长度上限）。
+  // ⚠️ 关键修复：Upstash REST API 的 POST body 必须是「裸 JSON 数组」 ["COMMAND","ARG1",...]
+  // （官方文档与 @upstash/redis SDK 均使用此格式）。此前误用 { command: [...] } 包裹对象，
+  // Upstash 解析 body 时期望数组却得到对象，返回 "expected JSON array"，导致所有命令失败
+  // （前端表现为排行榜 / 天梯战绩 / 房间全部异常）。
+  // 所有参数统一转成字符串，避免数字参数（如 LRANGE 的 stop、ZREVRANGE 的 0/-1）被误解析。
+  // URL 仅用 base（UPSTASH_REDIS_REST_URL），不在路径里拼接命令，从而彻底规避
+  // 「命令拼在 URL 路径里导致的 400 input length too long」（房间 JSON / boardSummary 等大值写入时易触顶）。
   async function rcmd(...args) {
+    const command = args.map((a) => (a == null ? '' : String(a)));
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         Authorization: 'Bearer ' + token,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ command: args }),
+      body: JSON.stringify(command),
     });
     const json = await res.json();
     if (json.error) throw new Error('upstash: ' + json.error);
@@ -491,8 +494,13 @@ function createUpstashStore() {
       await rcmd('LTRIM', 'ladder:history:' + String(uid), '0', '49'); // 保留最近 50
     },
     async ladderGetHistory(uid, limit) {
-      const arr = (await rcmd('LRANGE', 'ladder:history:' + String(uid), '0', String(Math.max(0, (limit || 50) - 1)))) || [];
-      return arr.map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean);
+      try {
+        const arr = (await rcmd('LRANGE', 'ladder:history:' + String(uid), '0', String(Math.max(0, (limit || 50) - 1)))) || [];
+        return arr.map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean);
+      } catch (e) {
+        // upstash 不可达 / 出错：降级返回空历史，避免 getHistory 抛异常使前端天梯战绩卡死
+        return [];
+      }
     },
     // 房间（Phase 2）
     async roomSet(code, room) { await upstashRoomSet(code, room); },

@@ -107,7 +107,12 @@ function handleRequest(req, res) {
       try {
         const view = await store.getRankView(uid, limit);
         return send(200, { code: 0, data: view });
-      } catch (e) { return send(500, { code: 500, message: String(e && e.message || e) }); }
+      } catch (e) {
+        // upstash 不可达 / 出错：降级返回默认视图，绝不让前端卡死（前端会显示「排名暂不可用」）。
+        // 注意：store.getRankView 仍按契约在 upstash 错误时抛错（store-upstash.test 已覆盖），
+        // 此处仅在 HTTP 信封层兜底，保证 /api/rank 永远返回 200 + 结构化默认数据。
+        return send(200, { code: 0, data: { top: [], selfRank: 0, selfName: '', selfScore: 0 } });
+      }
     })();
   }
 

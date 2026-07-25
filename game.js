@@ -408,11 +408,16 @@ Room.onExit(() => {
 // 游戏结束：上报成绩 + 天梯结算 + 拉取个人排名（供结束遮罩展示「你的排名」）
 // 排名拉取失败会静默降级（rankError/rankData 为空），绝不影响「再来一局」重开。
 function triggerGameOver() {
-  submitScore(state.score);
-  showBanner();
-  submitLadder(state);
-  rankData = null;        // 清空旧榜单，触发加载态
-  loadRank();             // 拉取个人排名（selfRank）
+  // 结束流程必须是「发射后不管」：任何一步失败（上报/匹配/拉榜）都不应阻断结束遮罩显示。
+  try {
+    submitScore(state.score);   // fire-and-forget（内部 try/catch）
+    showBanner();               // fire-and-forget（内部 try/catch）
+    submitLadder(state);        // fire-and-forget（内部 try/catch）
+    rankData = null;            // 清空旧榜单，触发加载态
+    loadRank();                 // 拉取个人排名（selfRank），失败静默降级
+  } catch (e) {
+    // 兜底：绝不让异常阻断「游戏结束」遮罩（state.over 已置位，draw 必画遮罩）
+  }
 }
 
 // ---------- 输入 ----------
@@ -540,6 +545,16 @@ tt.onTouchEnd((e) => {
       const lb = Ladder.ladderEntryBtnRect();
       if (screen === 'play' && hit(lb, t)) {
         openLadderHistory();
+        return;
+      }
+    }
+    // 房间入口按钮（左上角，紧挨天梯按钮右侧，避开系统胶囊）：命中即进入房间大厅
+    // 修复 Bug2：此前该按钮仅绘制、无点击处理，导致「房间点不进去」。
+    {
+      const rb2 = roomEntryBtnRect();
+      if (screen === 'play' && t.clientX >= rb2.x && t.clientX <= rb2.x + rb2.w &&
+          t.clientY >= rb2.y && t.clientY <= rb2.y + rb2.h) {
+        openRoom();
         return;
       }
     }
@@ -1004,6 +1019,7 @@ if (typeof module !== 'undefined' && module.exports) {
         setScroll: (v) => { rankScroll = v; },
         openRank,
         isTT,
+        draw, // QA 钩子：在 Node 下调用一次渲染帧，用于断言「游戏结束遮罩 / 排名降级文案」实际被绘制（ctx 为 mock，无副作用）
         getScreen: () => screen,
         getRankState: () => ({ loading: rankLoading, error: rankError, data: rankData, uid: rankUid, name: rankSelfName }),
         loseGame: () => { state.over = true; if (isTT) triggerGameOver(); },

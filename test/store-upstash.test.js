@@ -5,7 +5,7 @@
 // 覆盖 6 个断言：
 //   (a) rcmd 发出的是 POST 方法
 //   (b) 请求 URL 是 base url（不含命令参数拼在路径里）
-//   (c) body 是 { command: [...] } 且参数为原始字符串（不做 encodeURIComponent）
+//   (c) body 是裸 JSON 数组 ["COMMAND","ARG",...]（Upstash REST 官方格式，非 { command: [...] } 包裹）且参数为原始字符串
 //   (d) 带 Authorization: Bearer <token> 头（以及 Content-Type: application/json）
 //   (e) 当返回 { error: 'xxx' } 时 rcmd 抛错
 //   (f) 正常返回 json.result
@@ -48,13 +48,13 @@ async function main() {
     ok(call.url === URL, '(b) 请求 URL 应为 base url，实际 ' + call.url);
     ok(!/\/(GET|SET|ZADD|HSET|HGETALL|ZREVRANGE|EXPIRE|LPUSH|LTRIM|ZRANGEBYSCORE|LRANGE)/.test(call.url), '(b) URL 不应包含命令参数');
 
-    // (c) body 为 { command: [原始字符串] }
+    // (c) body 为裸 JSON 数组 [原始字符串]（Upstash REST 官方格式，非 { command: [...] } 包裹）
     let body;
     try { body = JSON.parse(opts.body); } catch (e) { /* ignore */ }
-    ok(body && Array.isArray(body.command), '(c) body 应包含 command 数组');
-    if (body && Array.isArray(body.command)) {
-      ok(body.command.every((x) => typeof x === 'string'), '(c) command 元素应为原始字符串（未 encodeURIComponent）');
-      ok(body.command[0] === 'GET' && body.command[1] === 'room:ROOMAB', "(c) command 应为 ['GET','room:ROOMAB']（原始值）");
+    ok(body && Array.isArray(body), '(c) body 应为裸 JSON 数组（Upstash REST 官方格式）');
+    if (body && Array.isArray(body)) {
+      ok(body.every((x) => typeof x === 'string'), '(c) 数组元素应为原始字符串（未 encodeURIComponent）');
+      ok(body[0] === 'GET' && body[1] === 'room:ROOMAB', "(c) 数组应为 ['GET','room:ROOMAB',...]（原始值）");
       // 进一步验证「大值 JSON」原样进 body、未做 URL 编码（这是触发 400 的关键场景）
       const calls2 = withFakeFetch(async () => ({ json: async () => ({ result: 'OK' }) }));
       const s2 = createUpstashStore();
@@ -63,7 +63,7 @@ async function main() {
       const c2 = calls2[calls2.length - 1];
       const b2 = JSON.parse(c2.opts.body);
       // roomSet -> rcmd('SET', 'room:CODE2', '<json>', 'EX', '600')
-      ok(b2.command[2] === JSON.stringify(bigRoom), '(c) 大值 JSON 应原样进 body，未做 URL 编码');
+      ok(b2[2] === JSON.stringify(bigRoom), '(c) 大值 JSON 应原样进 body，未做 URL 编码');
     }
 
     // (d) 请求头

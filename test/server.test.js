@@ -70,7 +70,8 @@ async function main() {
   global.fetch = async function fakeFetch(u, opts) {
     let command;
     if (opts && opts.body) {
-      try { command = JSON.parse(opts.body).command; } catch (e) { command = null; }
+      // rcmd 现在发送裸 JSON 数组（Upstash REST 官方格式），body 本身就是命令数组
+      try { command = JSON.parse(opts.body); } catch (e) { command = null; }
     }
     if (!Array.isArray(command) || !command.length) {
       const url = typeof u === 'string' ? u : (u && u.url);

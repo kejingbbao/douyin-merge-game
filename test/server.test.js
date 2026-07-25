@@ -65,11 +65,21 @@ async function main() {
   // 3) upstash（用假 fetch 模拟 Redis 命令）
   const board = new Map();
   const meta = new Map();
-  global.fetch = async function fakeFetch(u) {
-    const url = typeof u === 'string' ? u : u.url;
-    const parts = url.replace(/^https?:\/\/[^/]+/, '').split('/').filter(Boolean);
-    const cmd = parts[0];
-    const args = parts.slice(1).map(decodeURIComponent);
+  // upstash 真·后端模拟：从 rcmd 发出的 POST body { command: [...] } 解析命令
+  // （与改造后的 rcmd 一致：命令不再拼在 URL 路径里）。保留 URL 路径兜底以免旧调用形态失效。
+  global.fetch = async function fakeFetch(u, opts) {
+    let command;
+    if (opts && opts.body) {
+      try { command = JSON.parse(opts.body).command; } catch (e) { command = null; }
+    }
+    if (!Array.isArray(command) || !command.length) {
+      const url = typeof u === 'string' ? u : (u && u.url);
+      const parts = String(url || '').replace(/^https?:\/\/[^/]+/, '').split('/').filter(Boolean);
+      command = parts.map(decodeURIComponent);
+    }
+    if (!Array.isArray(command) || !command.length) return { json: async () => ({ result: null }) };
+    const cmd = command[0];
+    const args = command.slice(1);
     let result;
     if (cmd === 'ZADD') {
       let i = 1, gt = false;

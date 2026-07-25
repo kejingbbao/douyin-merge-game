@@ -1,0 +1,73 @@
+classDiagram
+    direction LR
+
+    class Room {
+        +string code
+        +number seed            // 同房同种子(整数[0,SEED_MAX], 建房生成)
+        +string status          // waiting|playing|finished|opponent_left|abandoned
+        +number createdAt
+        +number startAt         // 第2人加入后写入: 双方本地时钟≥此值才开局(无WS同步补偿)
+        +number ttl             // 600s (Redis key EXPIRE = 重连窗口)
+        +boolean orphan         // waiting期房主退出标记(房间保留)
+        +object players         // uid -> PlayerState
+        +object results         // uid -> ResultState
+        +number matchResult     // 0未定 1=P1胜 2=P2胜 3=平 4=对手退出 5=断线超时
+    }
+
+    class PlayerState {
+        +string uid
+        +string name
+        +boolean ready
+        +number score           // 最新一手进度(score/steps/over 仅三标量, 不传棋盘)
+        +number steps
+        +boolean over
+        +number updatedAt       // lastSeen: 用于 stale>600s → abandoned 判定
+        +boolean left           // 主动 leave 标记 → matchResult=4
+    }
+
+    class ResultState {
+        +string uid
+        +number score
+        +number steps
+        +number ts
+        +boolean won            // 是否先到2048
+    }
+
+    class RoomService {
+        +create(uid, name) Room
+        +join(code, uid, name) Room
+        +progress(code, uid, p) void
+        +getState(code, uid) RoomView
+        +submitResult(code, uid, r) void
+        +leave(code, uid) void
+        +reset(code) void        // 再来一局: 新seed, 回waiting, 清进度
+        -computeMatch(room) number
+        -makeSeed() number
+        -makeCode() string
+    }
+
+    class SeededRng {
+        <<frontend util>>
+        +makeRng(seedStr) function
+        -xmur3(str) function
+        -mulberry32(a) function
+    }
+
+    class Store {
+        <<interface>>
+        +roomSet(code, room)
+        +roomGet(code) Room
+        +roomProgress(code, uid, p)
+        +roomResult(code, uid, r)
+        +roomTouch(code)        // 读后 EXPIRE 续期600s
+    }
+
+    RoomService ..> Store : uses
+    RoomService ..> SeededRng : 建房生成seed(服务端仅存数值)
+    Room "1" *-- "2" PlayerState
+    Room "1" *-- "2" ResultState
+    SeededRng ..> Logic : 注入 rng 使同房同种子(客户端)
+
+    note for RoomService "computeMatch: 任一方won→该方胜; 否则到点比分高者胜, 平分=3; 终局顺序 left→stale→results齐→超时"
+    note for SeededRng "仅前端用: initGame(makeRng(seed))/move(...,rng) 必须每次传同一rng实例"
+    note for Room "matchResult: 0未定 1=P1 2=P2 3=平 4=对手退出(opponent_left) 5=断线超时(abandoned)"

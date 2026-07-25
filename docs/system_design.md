@@ -11,7 +11,7 @@
 | 阶段 | 模式 | 核心机制 | 传输 | 新平台 | 交付节奏 |
 |------|------|----------|------|--------|----------|
 | **Phase 1** | 异步天梯 | 局后按本局 score 自动匹配**历史快照对手**，结算"你 vs 对手" | 纯 REST（复用 /api/score 签名） | **无** | **本周独立交付** |
-| **Phase 2** | 实时房间 | 6 位码建房/加入，同房同种子开局，实时比分 | **Upstash Redis 状态总线 + 前端轮询/SSE**（不使用 Vercel 常驻 WS） | **无** | Phase 1 上线后启动 |
+| **Phase 2** | 实时房间 | 6 位码建房/加入，同房同种子开局，实时比分 | **Upstash Redis 状态总线 + 前端轮询/SSE**（不使用 Vercel 常驻 WS） | **无** | **实现中**（T1 后端已交付；T2 前端与 T3 集成进行中） |
 
 > ⚠️ **Vercel 不支持常驻 WebSocket**：Vercel serverless（含 Node 函数）是无状态请求/响应模型，函数有最大执行时长（Hobby 10s / Pro 默认 60s，最长 300s），**无法承载 tt.connectSocket 所需的持久双向连接**。因此 Phase 2 采用「Redis 作状态总线 + REST 轮询/SSE」替代 WS，既保真实时体验，又**零新托管**（详见 §1.3）。
 
@@ -383,12 +383,12 @@ sequenceDiagram
 
 ### 5.2 Phase 2 任务（依赖 Phase 1 + 平台决策先决）
 
-| ID | 任务 | 源文件 | 依赖 | 优先级 |
-|----|------|--------|------|--------|
-| **P2-T1** | **平台决策 + 方案验证**：确认采用「Upstash Redis 状态总线 + 轮询（默认 1500ms）/SSE」；产出 PoC 验证房间状态读写与轮询延迟。输出最终传输选型决策。 | `docs/`（决策记录）, `server/room.js`(骨架) | Phase 1 完成 | P1 |
-| **P2-T2** | **后端房间服务**：`room.js` 实现 create/join/progress/state/result；`store.js` 扩展房间方法（Redis 带 TTL）；`index.js` 新增 `/api/room/*` 路由。 | `server/room.js`(新), `server/store.js`(改), `server/index.js`(改) | P2-T1 | P1 |
-| **P2-T3** | **前端房间**：`src/room.js` 大厅 UI + 轮询进度 + 结算；`src/logic.js` 引入 seeded PRNG 使同房同种子开局；`game.js` 房间入口与 seed 开局接入。 | `src/room.js`(新), `src/logic.js`(改), `game.js`(改) | P2-T2 | P1 |
-| **P2-T4** | **房间联调 + 测试**：`test/room.test.js`（建房/加入/进度/结算/轮询）；双端模拟对战验收。 | `test/room.test.js`(新) | P2-T2, P2-T3 | P1 |
+| ID | 任务 | 源文件 | 依赖 | 优先级 | 状态 |
+|----|------|--------|------|--------|------|
+| **P2-T1** | **平台决策 + 方案验证**：确认采用「Upstash Redis 状态总线 + 轮询（默认 1500ms）/SSE」；产出 PoC 验证房间状态读写与轮询延迟。输出最终传输选型决策。 | `docs/`（决策记录）, `server/room.js`(骨架) | Phase 1 完成 | P1 | 已完成 |
+| **P2-T2** | **后端房间服务**：`room.js` 实现 create/join/progress/state/result；`store.js` 扩展房间方法（Redis 带 TTL）；`index.js` 新增 `/api/room/*` 路由。 | `server/room.js`(新), `server/store.js`(改), `server/index.js`(改) | P2-T1 | P1 | 已完成（T1 交付，含 reset 路由） |
+| **P2-T3** | **前端房间**：`src/room.js` 大厅 UI + 轮询进度 + 结算；`src/logic.js` 引入 seeded PRNG 使同房同种子开局；`game.js` 房间入口与 seed 开局接入。 | `src/room.js`(新), `src/logic.js`(改), `game.js`(改) | P2-T2 | P1 | 实现中（T2/T3 进行中） |
+| **P2-T4** | **房间联调 + 测试**：`test/room.test.js`（建房/加入/进度/结算/轮询）；双端模拟对战验收。 | `test/room.test.js`(新) | P2-T2, P2-T3 | P1 | 待 QA 验证 |
 
 ### 5.3 任务依赖图（Mermaid）
 

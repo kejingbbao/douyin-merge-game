@@ -5,6 +5,7 @@ const Logic = require('./src/logic.js');
 const config = require('./config.js');
 const HMAC = require('./src/hmac.js'); // 纯 JS HMAC-SHA256（抖音运行时无 Node crypto）
 const Ladder = require('./src/ladder.js'); // 天梯（异步匹配）前端客户端 + Canvas UI
+const Room = require('./src/room.js').createRoomClient(); // 房间对战前端客户端 + Canvas UI（Phase 2）
 
 const isTT = typeof tt !== 'undefined' && !!tt.createCanvas;
 let canvas = null;
@@ -48,7 +49,8 @@ const POP_MS = 340;    // 合并缩放/光晕持续时间
 const SCORE_MS = 720;  // 分数上浮消散时间
 
 let state = Logic.initGame();
-let screen = 'guide'; // 'guide' | 'play'：开局先显示玩法引导
+let roomRng = null; // 房间对局的 rng 实例（种子开局，每步复用同一实例，design-lock §5）
+let screen = 'guide'; // 'guide' | 'play' | 'room'：开局先显示玩法引导；room 为房间流程（含大厅/等待/对战/结算）
 
 // 视觉特效状态
 let mergeFx = [];   // 活跃合并特效：{ cells:[{r,c,val}], t0 }
@@ -215,6 +217,17 @@ function openRank() {
   loadRank();
 }
 
+// 房间对战入口：进入大厅（hall）；由 Room 接管后续大厅/等待/对战/结算流程
+function openRoom() {
+  Room.open(rankUid, rankSelfName);
+  screen = 'room';
+}
+
+// 房间入口按钮矩形（左上角，紧挨天梯按钮右侧，避开右上角系统胶囊，design-lock §7）
+function roomEntryBtnRect() {
+  return { x: 166, y: 56, w: 74, h: 30 };
+}
+
 function rankBtnRect() {
   // 左上角（避开右上角系统胶囊），y 与排行榜面板顶边(p.y=56)平行对齐，不贴顶
   return { x: 12, y: 56, w: 74, h: 30 };
@@ -376,6 +389,22 @@ function restart() {
   ladderError = null;
 }
 
+// ---------- 房间对战：生命周期回调注入（Room 在 seed 开局 / 退出时回调 game.js） ----------
+Room.onBeginMatch((seed) => {
+  const rng = Logic.makeRng(String(seed)); // 同一 seed → 双方同序列（design-lock §5）
+  state = Logic.initGame(rng);
+  roomRng = rng;            // 每步 move 必须复用同一 rng 实例（§5 硬约束）
+  moveSteps = 0;
+  ladderSeq++;              // 使进行中的天梯回调失效（竞态守门）
+  ladderMatch = null; ladderLoading = false; ladderError = null;
+});
+Room.onExit(() => {
+  screen = 'play';
+  state = Logic.initGame();
+  moveSteps = 0;
+  roomRng = null;
+});
+
 // 游戏结束：上报成绩 + 天梯结算 + 拉取个人排名（供结束遮罩展示「你的排名」）
 // 排名拉取失败会静默降级（rankError/rankData 为空），绝不影响「再来一局」重开。
 function triggerGameOver() {
@@ -454,6 +483,37 @@ tt.onTouchEnd((e) => {
       }
       return;
     }
+    // 房间对战界面：轻点交给 Room 处理 UI 按钮；滑动则走棋盘移动（仅对战中）
+    if (screen === 'room') {
+      const dx = t.clientX - sx, dy = t.clientY - sy;
+      if (Math.abs(dx) < 16 && Math.abs(dy) < 16) {
+        // 轻点：Room 处理大厅/等待/结算/键盘按钮（命中则已消费）
+        if (Room.handleTouch(sx, sy, t)) return;
+      }
+      // 非轻点（滑动）且对战中 → 棋盘移动；本地不阻塞（design-lock §6 ③）
+      if (Room.getPhase() === 'playing' && !state.over) {
+        const ddx = t.clientX - sx, ddy = t.clientY - sy;
+        if (Math.abs(ddx) < 24 && Math.abs(ddy) < 24) return; // 视作点击，忽略
+        let dir;
+        if (Math.abs(ddx) > Math.abs(ddy)) dir = ddx > 0 ? 'right' : 'left';
+        else dir = ddy > 0 ? 'down' : 'up';
+        const res = Logic.move(state, dir, roomRng);
+        if (res.moved) {
+          state = res.state;
+          moveSteps += 1;
+          applyMoveFx(res);
+          // 进度上报（节流 ≥500ms 或每步取先到者，design-lock §4 Q4）
+          Room.reportProgress(state.score, moveSteps, state.over);
+          // 满格(over)或先到 2048 → 自动提交终局（won=false / won=true，§3 Q1）
+          const won = Logic.maxTile(state.grid) >= 2048;
+          if (state.over || won) {
+            Room.submitMyResult(state.score, moveSteps, won);
+          }
+        }
+      }
+      return;
+    }
+
     // 震动开关按钮：命中即切换并返回，不触发移动
     {
       const tg = vibrateToggleRect();
@@ -494,21 +554,12 @@ tt.onTouchEnd((e) => {
     if (Math.abs(dx) > Math.abs(dy)) dir = dx > 0 ? 'right' : 'left';
     else dir = dy > 0 ? 'down' : 'up';
     const res = Logic.move(state, dir);
-    if (res.moved) {
-      state = res.state;
-      moveSteps += 1;
-      if (res.merged && res.merged.length) {
-        const cells = res.merged.map(([r, c]) => ({ r, c, val: state.grid[r][c] }));
-        mergeFx.push({ cells, t0: Date.now() });
-        for (const cc of cells) spawnParticles(cc.r, cc.c, cc.val);
-        if (res.gained) {
-          scorePops.push({ x: boardX + boardSize / 2, y: boardY - 14, val: res.gained, t0: Date.now() });
-        }
-        // 合并时轻微震动（受震动开关控制），强化“撞击”手感
-        try { if (vibrateOn && tt.vibrateShort) tt.vibrateShort({ type: 'light' }); } catch (e) { /* noop */ }
+      if (res.moved) {
+        state = res.state;
+        moveSteps += 1;
+        applyMoveFx(res);
+        if (state.over) { triggerGameOver(); }
       }
-      if (state.over) { triggerGameOver(); }
-    }
   });
 
   // 排行榜界面：拖动滚动列表（手指上滑 → 列表上滚 → rankScroll 增大）
@@ -533,6 +584,10 @@ tt.onTouchEnd((e) => {
     if (screen === 'rank' || screen === 'ladder' || screen === 'ladderHistory') {
       screen = 'play';
       return true; // 消费返回事件，仅关闭弹层（排行榜 / 天梯结算 / 天梯战绩）
+    }
+    if (screen === 'room') {
+      Room.exit(); // 退出房间（playing/waiting 期礼貌 POST leave），返回主界面
+      return true; // 消费返回事件，仅关闭房间
     }
     return false; // 游戏主界面走系统默认（退出小游戏）
   };
@@ -605,6 +660,18 @@ function spawnParticles(r, c, val) {
       color: spark, size: cell * 0.05 + Math.random() * cell * 0.05,
     });
   }
+}
+
+function applyMoveFx(res) {
+  if (!res || !res.merged || !res.merged.length) return;
+  const cells = res.merged.map(([r, c]) => ({ r, c, val: state.grid[r][c] }));
+  mergeFx.push({ cells, t0: Date.now() });
+  for (const cc of cells) spawnParticles(cc.r, cc.c, cc.val);
+  if (res.gained) {
+    scorePops.push({ x: boardX + boardSize / 2, y: boardY - 14, val: res.gained, t0: Date.now() });
+  }
+  // 合并时轻微震动（受震动开关控制），强化“撞击”手感
+  try { if (vibrateOn && tt.vibrateShort) tt.vibrateShort({ type: 'light' }); } catch (e) { /* noop */ }
 }
 
 function updateParticles(dt) {
@@ -806,6 +873,19 @@ function draw() {
     ctx.fillText('天梯', lb.x + lb.w / 2, lb.y + lb.h / 2);
   }
 
+  // 房间入口按钮（左上角，紧挨天梯按钮右侧，避开系统胶囊），仅游戏进行中显示
+  if (screen === 'play') {
+    const rm = roomEntryBtnRect();
+    ctx.fillStyle = '#8f7a66';
+    roundRect(rm.x, rm.y, rm.w, rm.h, rm.h / 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('房间', rm.x + rm.w / 2, rm.y + rm.h / 2);
+  }
+
   // 游戏结束遮罩
   if (state.over && screen === 'play') {
     ctx.fillStyle = 'rgba(250,248,239,0.80)';
@@ -877,6 +957,8 @@ function draw() {
   if (screen === 'ladder') drawLadder();
   // 天梯战绩面板（覆盖在最上层）
   if (screen === 'ladderHistory') drawLadderHistory();
+  // 房间对战 UI（覆盖在最上层；screen==='room' 时由 Room 接管绘制）
+  if (screen === 'room') { Room.setStateRef(state); Room.render(ctx, L); }
 }
 
 // 天梯结算卡绘制（数据来自 ladderMatch / ladderLoading / ladderError）
@@ -927,6 +1009,18 @@ if (typeof module !== 'undefined' && module.exports) {
         loseGame: () => { state.over = true; if (isTT) triggerGameOver(); },
         setRankError: (v) => { rankError = v; },
         rankBtnRect,
+        roomEntryBtnRect,
+        openRoom,
+        getRoomPhase: () => Room.getPhase(),
+        getRoomState: () => Room.getState(),
+        roomHandleTouch: (sx, sy, t) => Room.handleTouch(sx, sy, t),
+        roomCreate: () => Room.createRoom(),
+        roomJoin: (c) => Room.joinRoom(c),
+        roomReport: (s, st, o) => Room.reportProgress(s, st, o),
+        roomResult: (s, st, w) => Room.submitMyResult(s, st, w),
+        roomExit: () => Room.exit(),
+        roomRestart: () => Room.requestRestart(),
+        getRoomRng: () => roomRng,
         ladderEntryBtnRect: () => Ladder.ladderEntryBtnRect(),
         openLadderHistory,
         getLadderState: () => ({

@@ -24,6 +24,9 @@
 const fs = require('fs');
 const path = require('path');
 
+// 房间 key 过期时间（600s，对应重连窗口 / TTL；design-lock §1.1 ROOM_TTL_SECONDS）
+const ROOM_TTL_MS = 600000;
+
 // ---------- 通用层：把后端提供的「条目集合」包装成统一接口 ----------
 // backend 需实现：
 //   async getEntries()            -> [{ uid, name, score }]
@@ -104,6 +107,28 @@ function makeStore(backend) {
     return backend.ladderGetHistory(String(uid), limit || 50);
   }
 
+  // ---------- 房间方法（Phase 2 实时对战，三后端一致） ----------
+  // 这些方法仅做「委托」：真实存储由 backend.xxx 实现（memory/file/upstash 各一份）。
+  async function roomSet(code, room) {
+    await backend.roomSet(String(code), room);
+    return true;
+  }
+  async function roomGet(code) {
+    return backend.roomGet(String(code)); // 不存在返回 null
+  }
+  async function roomProgress(code, uid, p) {
+    await backend.roomProgress(String(code), String(uid), p);
+    return true;
+  }
+  async function roomResult(code, uid, r) {
+    await backend.roomResult(String(code), String(uid), r);
+    return true;
+  }
+  async function roomTouch(code) {
+    await backend.roomTouch(String(code));
+    return true;
+  }
+
   return {
     recordScore,
     getRankView,
@@ -111,6 +136,11 @@ function makeStore(backend) {
     matchSnapshot,
     pushHistory,
     getHistory,
+    roomSet,
+    roomGet,
+    roomProgress,
+    roomResult,
+    roomTouch,
     _dump: () => backend.getEntries(),
     _backend: backend.type,
   };
@@ -123,6 +153,7 @@ function createMemoryStore() {
   const ladderSnaps = new Map();   // member(uid:ts) -> snapshot
   const ladderLastOpp = new Map(); // uid -> { uid, ts }
   const ladderHist = new Map();    // uid -> [rec,...] (newest first, ≤50)
+  const roomMap = new Map();       // code -> { obj, expireAt }
 
   function normalizeSnap(s) {
     return {
@@ -173,6 +204,39 @@ function createMemoryStore() {
       const arr = ladderHist.get(String(uid)) || [];
       return arr.slice(0, Math.max(1, limit || 50));
     },
+    // 房间（Phase 2）：整体存 { obj, expireAt }，读时检查过期
+    async roomSet(code, room) {
+      roomMap.set(String(code), { obj: room, expireAt: Date.now() + ROOM_TTL_MS });
+    },
+    async roomGet(code) {
+      const e = roomMap.get(String(code));
+      if (!e) return null;
+      if (Date.now() > e.expireAt) { roomMap.delete(String(code)); return null; }
+      return e.obj;
+    },
+    async roomProgress(code, uid, p) {
+      const e = roomMap.get(String(code));
+      if (!e) return;
+      e.obj.players = e.obj.players || {};
+      const player = e.obj.players[String(uid)] || { uid: String(uid) };
+      player.score = Math.floor(Number(p.score) || 0);
+      player.steps = Math.floor(Number(p.steps) || 0);
+      player.over = !!p.over;
+      player.updatedAt = Date.now();
+      e.obj.players[String(uid)] = player;
+      e.expireAt = Date.now() + ROOM_TTL_MS;
+    },
+    async roomResult(code, uid, r) {
+      const e = roomMap.get(String(code));
+      if (!e) return;
+      e.obj.results = e.obj.results || {};
+      e.obj.results[String(uid)] = r;
+      e.expireAt = Date.now() + ROOM_TTL_MS;
+    },
+    async roomTouch(code) {
+      const e = roomMap.get(String(code));
+      if (e) e.expireAt = Date.now() + ROOM_TTL_MS;
+    },
   });
 }
 
@@ -185,6 +249,25 @@ function createFileStore(file) {
   const ladderSnaps = new Map();
   const ladderLastOpp = new Map();
   const ladderHist = new Map();
+
+  const roomDir = path.dirname(fp);
+  function roomFilePath(code) { return path.join(roomDir, 'room-' + String(code) + '.json'); }
+  function fileRoomGet(code) {
+    try {
+      const raw = fs.readFileSync(roomFilePath(code), 'utf8');
+      const o = JSON.parse(raw);
+      if (o && o.expireAt && Date.now() > o.expireAt) {
+        try { fs.unlinkSync(roomFilePath(code)); } catch (e2) { /* 忽略 */ }
+        return null;
+      }
+      return o ? o.obj : null;
+    } catch (e) { return null; }
+  }
+  function fileRoomSet(code, room) {
+    try {
+      fs.writeFileSync(roomFilePath(code), JSON.stringify({ obj: room, expireAt: Date.now() + ROOM_TTL_MS }));
+    } catch (e) { /* 忽略写失败 */ }
+  }
 
   try {
     const raw = fs.readFileSync(fp, 'utf8');
@@ -271,6 +354,32 @@ function createFileStore(file) {
       const arr = ladderHist.get(String(uid)) || [];
       return arr.slice(0, Math.max(1, limit || 50));
     },
+    // 房间（Phase 2）：以 room-<code>.json 落盘（文件名避开 Windows 非法的 ':'）
+    async roomSet(code, room) { fileRoomSet(code, room); },
+    async roomGet(code) { return fileRoomGet(code); },
+    async roomProgress(code, uid, p) {
+      const room = fileRoomGet(code);
+      if (!room) return;
+      room.players = room.players || {};
+      const player = room.players[String(uid)] || { uid: String(uid) };
+      player.score = Math.floor(Number(p.score) || 0);
+      player.steps = Math.floor(Number(p.steps) || 0);
+      player.over = !!p.over;
+      player.updatedAt = Date.now();
+      room.players[String(uid)] = player;
+      fileRoomSet(code, room);
+    },
+    async roomResult(code, uid, r) {
+      const room = fileRoomGet(code);
+      if (!room) return;
+      room.results = room.results || {};
+      room.results[String(uid)] = r;
+      fileRoomSet(code, room);
+    },
+    async roomTouch(code) {
+      const room = fileRoomGet(code);
+      if (room) fileRoomSet(code, room); // 重写即刷新 expireAt
+    },
   });
 }
 
@@ -288,9 +397,21 @@ function createUpstashStore() {
   const BOARD = 'rank:board';
   const META = 'rank:meta';
 
+  // 提交单条 Redis 命令。
+  // 采用 Upstash 官方推荐的「POST body 命令」方式：
+  //   - 命令参数全部放进请求体 { command: [...] }（原始字符串，不做 encodeURIComponent）
+  //   - URL 仅用 base（UPSTASH_REDIS_REST_URL），不在路径里拼接命令
+  // 这样可彻底消除「命令拼在 URL 路径里导致的 400 input length too long」问题
+  // （房间 JSON / boardSummary 等大值写入时尤其容易触顶 URL 长度上限）。
   async function rcmd(...args) {
-    const p = args.map((a) => encodeURIComponent(String(a))).join('/');
-    const res = await fetch(url + '/' + p, { headers: { Authorization: 'Bearer ' + token } });
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ command: args }),
+    });
     const json = await res.json();
     if (json.error) throw new Error('upstash: ' + json.error);
     return json.result;
@@ -300,6 +421,19 @@ function createUpstashStore() {
     const o = {};
     for (let i = 0; i + 1 < flat.length; i += 2) o[flat[i]] = flat[i + 1];
     return o;
+  }
+
+  // 房间（Phase 2）：key = room:<code>，整体 JSON，EXPIRE 600s
+  async function upstashRoomGet(code) {
+    try {
+      const r = await rcmd('GET', 'room:' + String(code));
+      if (r == null) return null;
+      const s = typeof r === 'string' ? r : String(r);
+      try { return JSON.parse(s); } catch (e) { return null; }
+    } catch (e) { return null; } // upstash 不可达：返回 null（不抛）
+  }
+  async function upstashRoomSet(code, room) {
+    try { await rcmd('SET', 'room:' + String(code), JSON.stringify(room), 'EX', '600'); } catch (e) { /* 静默失败 */ }
   }
 
   return makeStore({
@@ -359,6 +493,35 @@ function createUpstashStore() {
     async ladderGetHistory(uid, limit) {
       const arr = (await rcmd('LRANGE', 'ladder:history:' + String(uid), '0', String(Math.max(0, (limit || 50) - 1)))) || [];
       return arr.map((s) => { try { return JSON.parse(s); } catch (e) { return null; } }).filter(Boolean);
+    },
+    // 房间（Phase 2）
+    async roomSet(code, room) { await upstashRoomSet(code, room); },
+    async roomGet(code) { return upstashRoomGet(code); },
+    async roomProgress(code, uid, p) {
+      try {
+        const room = await upstashRoomGet(code);
+        if (!room) return;
+        room.players = room.players || {};
+        const player = room.players[String(uid)] || { uid: String(uid) };
+        player.score = Math.floor(Number(p.score) || 0);
+        player.steps = Math.floor(Number(p.steps) || 0);
+        player.over = !!p.over;
+        player.updatedAt = Date.now();
+        room.players[String(uid)] = player;
+        await upstashRoomSet(code, room);
+      } catch (e) { /* 静默失败 */ }
+    },
+    async roomResult(code, uid, r) {
+      try {
+        const room = await upstashRoomGet(code);
+        if (!room) return;
+        room.results = room.results || {};
+        room.results[String(uid)] = r;
+        await upstashRoomSet(code, room);
+      } catch (e) { /* 静默失败 */ }
+    },
+    async roomTouch(code) {
+      try { await rcmd('EXPIRE', 'room:' + String(code), '600'); } catch (e) { /* 静默失败 */ }
     },
   });
 }

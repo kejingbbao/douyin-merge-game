@@ -26,6 +26,7 @@ const http = require('http');
 const { createStore } = require('./store.js');
 const { verifyPayload } = require('./verify.js');
 const { LadderService } = require('./ladder.js');
+const { makeRoomService } = require('./room.js');
 
 const RANK_SECRET = process.env.RANK_SECRET || '';
 const SIGN_TTL = parseInt(process.env.SIGN_TTL || '300', 10);
@@ -49,6 +50,9 @@ function sendJson(res, code, obj) {
 
 // 天梯服务（复用全局 store 与 verify）
 const ladder = new LadderService(store, { verifyPayload, maxScore: RANK_MAX_SCORE, send: sendJson });
+
+// 房间对战服务（Phase 2，复用同一 store 实例与 RANK_SECRET）
+const roomService = makeRoomService(store, RANK_SECRET);
 
 // ---------- 核心路由处理函数（Vercel + 本地共用） ----------
 function handleRequest(req, res) {
@@ -107,6 +111,12 @@ function handleRequest(req, res) {
     })();
   }
 
+  // ---------- 房间对战路由（Phase 2） ----------
+  const roomMatch = req.url.match(/^\/api\/room\/([a-z]+)/);
+  if (roomMatch && ROOM_ROUTES[roomMatch[1]] && req.method === ROOM_ROUTES[roomMatch[1]].method) {
+    return handleRoomRoute(roomMatch[1], req, res, send);
+  }
+
   send(404, { code: 404, message: 'not found' });
 }
 
@@ -132,6 +142,63 @@ function handleScorePost(body, send, done) {
   } catch (e) {
     send(400, { code: 400, message: String(e && e.message || e) });
     done();
+  }
+}
+
+// ---------- 房间对战路由辅助（Phase 2） ----------
+// 从请求体读取完整 JSON（兼容 Vercel 预解析 req.body 与本地流式）
+function readBody(req) {
+  return new Promise((resolve) => {
+    if (req.body !== undefined) {
+      const b = typeof req.body === 'string' ? req.body : (req.body ? JSON.stringify(req.body) : '');
+      return resolve(b);
+    }
+    let buf = '';
+    req.on('data', (c) => (buf += c));
+    req.on('end', () => resolve(buf));
+  });
+}
+
+// 房间路由表：method=HTTP 方法，svc=RoomService 方法名，
+// sig=验签 canonical 拼接，args=提取传入 RoomService 的参数。
+// canonical 严格对齐 design-lock §4（create/join/state/leave → uid|ts；progress/result → uid|score|steps|ts）。
+const ROOM_ROUTES = {
+  create:   { method: 'POST', svc: 'create',        sig: (b) => String(b.uid) + '|' + b.ts,                                  args: (b) => ({ uid: b.uid, name: b.name }) },
+  join:     { method: 'POST', svc: 'join',          sig: (b) => String(b.uid) + '|' + b.ts,                                  args: (b) => ({ code: b.code, uid: b.uid, name: b.name }) },
+  progress: { method: 'POST', svc: 'progress',      sig: (b) => String(b.uid) + '|' + b.score + '|' + b.steps + '|' + b.ts, args: (b) => ({ code: b.code, uid: b.uid, score: b.score, steps: b.steps, over: b.over }) },
+  state:    { method: 'GET',  svc: 'getState',      sig: (q) => String(q.uid) + '|' + q.ts,                                  args: (q) => ({ code: q.code, uid: q.uid }) },
+  result:   { method: 'POST', svc: 'submitResult',  sig: (b) => String(b.uid) + '|' + b.score + '|' + b.steps + '|' + b.ts, args: (b) => ({ code: b.code, uid: b.uid, score: b.score, steps: b.steps, won: b.won }) },
+  leave:    { method: 'POST', svc: 'leave',         sig: (q) => String(q.uid) + '|' + q.ts,                                  args: (q) => ({ code: q.code, uid: q.uid }) },
+  // 再来一局（design-lock §3 Q5）：终局后由先点击方触发 status→waiting；对手轮询到 waiting 后重连重开
+  reset:    { method: 'POST', svc: 'reset',         sig: (b) => String(b.uid) + '|' + b.ts,                                  args: (b) => ({ code: b.code, uid: b.uid }) },
+};
+
+async function handleRoomRoute(name, req, res, send) {
+  const cfg = ROOM_ROUTES[name];
+  let params;
+  if (cfg.method === 'GET') {
+    const u = new URL(req.url, 'http://localhost');
+    params = {
+      code: u.searchParams.get('code'),
+      uid: u.searchParams.get('uid'),
+      ts: u.searchParams.get('ts'),
+      sig: u.searchParams.get('sig'),
+    };
+  } else {
+    const raw = await readBody(req);
+    try { params = JSON.parse(raw || '{}'); } catch (e) {
+      return send(200, { code: 4, data: null, message: '请求体格式错误' });
+    }
+  }
+  // 验签（secret 为空→开发模式跳过；对齐 verifyPayload）
+  if (!verifyPayload(cfg.sig(params), params.ts, params.sig)) {
+    return send(200, { code: 2, data: null, message: '签名失效' });
+  }
+  try {
+    const result = await roomService[cfg.svc](cfg.args(params));
+    return send(200, result);
+  } catch (e) {
+    return send(200, { code: 5, data: null, message: '服务端错误：' + (e && e.message || e) });
   }
 }
 

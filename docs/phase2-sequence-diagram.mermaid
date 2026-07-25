@@ -1,0 +1,58 @@
+sequenceDiagram
+    participant H as 玩家1(房主,抖音)
+    participant G as 玩家2(抖音)
+    participant API as Vercel /api/room/* (同一 RANK_ENDPOINT)
+    participant DB as Upstash Redis(状态总线, EXPIRE 600s)
+
+    Note over H,G: 域名须为「国内可达自定义域名」(见 P0-DEPLOY 前置)
+
+    H->>API: POST /room/create {uid,name,ts,sig}
+    API->>DB: 建房间(code,seed,status=waiting,startAt=null,EXPIRE 600)
+    API-->>H: {code,seed,status:waiting}
+
+    G->>API: POST /room/join {code,uid,name,ts,sig}
+    API->>DB: 加入(players=2); 写 startAt=now+3000; status=playing
+    API-->>G: {seed,players,startAt,status:playing}
+
+    H->>API: GET /room/state (轮询1s, 等对手)
+    API->>DB: 读房间(含startAt); roomTouch续期
+    API-->>H: {status:playing,startAt,...}
+
+    Note over H,G: 双方本地时钟 ≥ startAt 时开局(countdown同步, 无WS补偿)
+
+    H->>H: initGame(makeRng(seed))   // 同房同种子
+    G->>G: initGame(makeRng(seed))
+
+    loop 每步上报 + 轮询(1.5s; 失败超时3.5s+指数退避1.5→3→4.5→6s; 本地不阻塞)
+        H->>API: POST /room/progress {score,steps,over}
+        API->>DB: HSET room:code player:h ; roomTouch(续期)
+        H->>API: GET /room/state
+        API->>DB: 读对手 G 进度; 终局判定(left→stale→results齐→超时)
+        API-->>H: {opponent:{score,steps,over,updatedAt}, matchResult}
+        G 同理(对称)
+    end
+
+    Note over H,G: 满格(over)即隐式 submitResult(won=false); 先到2048者 won=true
+
+    H->>H: maxTile==2048 或 计时到点
+    H->>API: POST /room/result {score,steps,won}
+    G->>API: POST /room/result {score,steps,won}
+    API->>DB: 双方结果齐 → computeMatch → 写 matchResult + status=finished
+    H->>API: GET /room/state
+    API-->>H: {matchResult:1|2|3, myScore, oppScore}
+    H->>H: Canvas 渲染房间结算卡
+    G 同理
+
+    Note over H,G: 断线重连: POST /room/join(code,uid) → 服务端识别已存在uid不重复加人, 返回seed/startAt/status 恢复轮询
+    Note over H,G: 再来一局: 任一方 POST /room/reset → 新seed, 回waiting, 清进度 → 双方重新同步开局
+
+    alt 对手主动退出(playing期)
+        G->>API: POST /room/leave {code,uid}
+        API->>DB: players[g].left=true; matchResult=4; status=opponent/opponent_left
+        H->>API: GET /room/state
+        API-->>H: {matchResult:4}  // 结算卡: 对手已离开 / 你赢了
+    else 对手断线超TTL(playing期)
+        API->>API: getState 发现对手 lastSeen>600s → matchResult=5; status=abandoned
+        H->>API: GET /room/state
+        API-->>H: {matchResult:5}  // 结算卡: 对手已离开
+    end

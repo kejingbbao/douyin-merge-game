@@ -76,6 +76,7 @@ let rankError = null;     // 榜单请求失败信息
 let rankData = null;      // 榜单数据：{ top, selfRank, selfName, selfScore }
 let rankUid = '';         // 本机唯一标识（存 storage）
 let rankSelfName = '我';  // 展示昵称（首次随机生成，存 storage）
+let rankReturnScreen = 'play'; // 打开榜单前的界面，关闭时回到此处（健壮性）
 
 if (isTT) {
   try {
@@ -212,6 +213,7 @@ function openRank() {
   rankError = null;
   rankData = null;
   rankScroll = 0;
+  rankReturnScreen = screen; // 记录来源界面，关闭时返回（避免跳错界面）
   screen = 'rank';
   submitScore(state.score);
   loadRank();
@@ -237,8 +239,9 @@ function rankPanelRect() {
 }
 function rankCloseRect() {
   // 放在面板左上角，避开抖音小游戏右上角的系统胶囊按钮（菜单/关闭），保证可点
+  // 放大到 38px 并多留内边距，降低角落按钮误触/点不中的概率
   const p = rankPanelRect();
-  return { x: p.x + 10, y: p.y + 10, w: 28, h: 28 };
+  return { x: p.x + 8, y: p.y + 8, w: 38, h: 38 };
 }
 
 function drawRank() {
@@ -466,21 +469,23 @@ tt.onTouchEnd((e) => {
     }
     return;
   }
-  // 排行榜界面：关闭按钮优先判定（任何状态都可关），否则错误态点击重试
+  // 排行榜界面：关闭按钮优先判定（任何状态、轻微滑动都可关），否则错误态点击重试
   if (screen === 'rank') {
-      const dx = t.clientX - sx, dy = t.clientY - sy;
-      if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
-        // 关闭按钮优先：错误态下也不能让「点哪都重试」吞掉关闭，否则榜单关不掉
-        const cr = rankCloseRect();
-        if (t.clientX >= cr.x && t.clientX <= cr.x + cr.w &&
-            t.clientY >= cr.y && t.clientY <= cr.y + cr.h) {
-          screen = 'play';
-          return;
-        }
-        if (rankError) { loadRank(); return; }
-      }
+    // 关闭判定不锁进「轻点阈值」：按下点(sx,sy)或抬起点(t)任一命中 × 即关，
+    // 容忍手指从按下到抬起的轻微位移（触屏角落按钮常见），避免关闭被吞掉
+    const cr = rankCloseRect();
+    const pressPt = { clientX: sx, clientY: sy };
+    if (hit(cr, t) || hit(cr, pressPt)) {
+      screen = rankReturnScreen; // 回到打开榜单时的来源界面
       return;
     }
+    // 错误态：轻点任意处重试（关闭已优先处理，这里不会再命中 ×）
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+      if (rankError) { loadRank(); return; }
+    }
+    return;
+  }
     if (screen === 'guide') {
       const bx = W / 2 - 80, by = H / 2 + 60, bw = 160, bh = 48;
       if (t.clientX >= bx && t.clientX <= bx + bw && t.clientY >= by && t.clientY <= by + bh) {
@@ -1029,6 +1034,8 @@ if (typeof module !== 'undefined' && module.exports) {
         loseGame: () => { state.over = true; if (isTT) triggerGameOver(); },
         setRankError: (v) => { rankError = v; },
         rankBtnRect,
+        rankCloseRect, // QA 钩子：返回排行榜关闭 × 的屏幕矩形，供回归测试按真实生产坐标驱动 touch
+        getRankReturnScreen: () => rankReturnScreen, // QA 钩子：返回打开榜单时记录的来源界面
         roomEntryBtnRect,
         openRoom,
         getRoomPhase: () => Room.getPhase(),

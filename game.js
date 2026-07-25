@@ -376,6 +376,16 @@ function restart() {
   ladderError = null;
 }
 
+// 游戏结束：上报成绩 + 天梯结算 + 拉取个人排名（供结束遮罩展示「你的排名」）
+// 排名拉取失败会静默降级（rankError/rankData 为空），绝不影响「再来一局」重开。
+function triggerGameOver() {
+  submitScore(state.score);
+  showBanner();
+  submitLadder(state);
+  rankData = null;        // 清空旧榜单，触发加载态
+  loadRank();             // 拉取个人排名（selfRank）
+}
+
 // ---------- 输入 ----------
 if (isTT) {
   let sx = 0;
@@ -491,7 +501,7 @@ tt.onTouchEnd((e) => {
         // 合并时轻微震动（受震动开关控制），强化“撞击”手感
         try { if (vibrateOn && tt.vibrateShort) tt.vibrateShort({ type: 'light' }); } catch (e) { /* noop */ }
       }
-      if (state.over) { submitScore(state.score); showBanner(); submitLadder(state); }
+      if (state.over) { triggerGameOver(); }
     }
   });
 
@@ -794,13 +804,39 @@ function draw() {
   if (state.over && screen === 'play') {
     ctx.fillStyle = 'rgba(250,248,239,0.80)';
     ctx.fillRect(boardX, boardY, boardSize, boardSize);
-    ctx.fillStyle = '#776e65';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+
+    // 标题
+    ctx.fillStyle = '#776e65';
     ctx.font = 'bold 26px sans-serif';
-    ctx.fillText('游戏结束', W / 2, H / 2 - 16);
-    ctx.font = '16px sans-serif';
-    ctx.fillText('点击看广告重开', W / 2, H / 2 + 18);
+    ctx.fillText('游戏结束', W / 2, H / 2 - 64);
+
+    // 本局得分
+    ctx.fillStyle = '#5b4a1f';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText('本局得分：' + state.score, W / 2, H / 2 - 30);
+
+    // 个人排名行（按优先级：加载中 → 有效排名 → 暂不可用）
+    let rankLine = '排名暂不可用';
+    if (rankLoading) {
+      rankLine = '排名加载中…';
+    } else if (rankData && Number(rankData.selfRank) > 0) {
+      rankLine = '你的排名：第 ' + rankData.selfRank + ' 位';
+    }
+    ctx.fillStyle = '#776e65';
+    ctx.font = '15px sans-serif';
+    ctx.fillText(rankLine, W / 2, H / 2 + 2);
+
+    // 底部「再来一局」按钮（圆角，底色 #edc22e，文字色 #5b4a1f）
+    const bw = 160, bh = 44;
+    const bx = W / 2 - bw / 2, by = H / 2 + 30;
+    ctx.fillStyle = '#edc22e';
+    roundRect(bx, by, bw, bh, bh / 2);
+    ctx.fill();
+    ctx.fillStyle = '#5b4a1f';
+    ctx.font = 'bold 15px sans-serif';
+    ctx.fillText('再来一局', W / 2, by + bh / 2);
   }
 
   // 开局引导
@@ -839,7 +875,11 @@ function draw() {
 
 // 天梯结算卡绘制（数据来自 ladderMatch / ladderLoading / ladderError）
 function drawLadder() {
-  Ladder.drawLadderCard(ctx, L, ladderMatch, { loading: ladderLoading, error: ladderError });
+  Ladder.drawLadderCard(ctx, L, ladderMatch, {
+    loading: ladderLoading,
+    error: ladderError,
+    selfRank: (rankData && rankData.selfRank) || 0,
+  });
 }
 
 // 天梯战绩面板绘制（数据来自 ladderHist / ladderHistLoading / ladderHistError）
@@ -877,6 +917,7 @@ if (typeof module !== 'undefined' && module.exports) {
         isTT,
         getScreen: () => screen,
         getRankState: () => ({ loading: rankLoading, error: rankError, data: rankData, uid: rankUid, name: rankSelfName }),
+        loseGame: () => { state.over = true; if (isTT) triggerGameOver(); },
         setRankError: (v) => { rankError = v; },
         rankBtnRect,
         ladderEntryBtnRect: () => Ladder.ladderEntryBtnRect(),

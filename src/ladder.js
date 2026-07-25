@@ -232,6 +232,13 @@ function drawLadderCard(ctx, L, match, opts) {
   const sign = match.diff > 0 ? '+' : '';
   ctx.fillText('分差 ' + sign + match.diff + (match.synthetic ? '（合成对手）' : ''), L.W / 2, resY + 28);
 
+  // 个人排名（游戏结束时已拉取，仅在有效正整数时展示）
+  if (opts.selfRank && Number(opts.selfRank) > 0) {
+    ctx.fillStyle = '#edc22e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '15px sans-serif';
+    ctx.fillText('你的排名：第 ' + opts.selfRank + ' 位', L.W / 2, resY + 54);
+  }
+
   // 底部按钮：再来一局 / 看战绩
   const ab = ladderAgainBtnRect(L);
   ctx.fillStyle = '#edc22e'; rr(ctx, ab.x, ab.y, ab.w, ab.h, ab.h / 2); ctx.fill();

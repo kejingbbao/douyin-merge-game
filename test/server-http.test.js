@@ -2,7 +2,10 @@
 // 直接启动真实 HTTP 服务，验证防刷分：签名校验 / 时间戳防重放 / 分数范围。
 process.env.RANK_SECRET = 'server-test-secret';
 process.env.RANK_STORE = 'memory';
-const server = require('../server/index.js');
+const http = require('http');
+// server/index.js 导出的是 Vercel Serverless 请求处理函数（handler），
+// 本地测试需自行用 http.createServer 包一层才能 listen。
+const server = http.createServer(require('../server/index.js'));
 const HMAC = require('../src/hmac.js');
 
 let pass = 0, fail = 0;
@@ -31,7 +34,7 @@ server.listen(0, async () => {
     // 1) 合法签名 -> 200
     let r = await postScore('u1', 500, now, signScore('u1', 500, now));
     let j = await r.json();
-    ok(r.status === 200 && j.ok === true, '合法签名应 200，实际 ' + r.status + ' ' + JSON.stringify(j));
+    ok(r.status === 200 && j.code === 0 && j.data && j.data.ok === true, '合法签名应 200，实际 ' + r.status + ' ' + JSON.stringify(j));
 
     // 2) 错误签名 -> 403
     r = await postScore('u1', 999999, now, 'deadbeef');
@@ -46,7 +49,7 @@ server.listen(0, async () => {
     // 4) 合法后查榜 -> 200 且含该玩家
     r = await getRank('u1', now, signRank('u1', now));
     j = await r.json();
-    ok(r.status === 200 && j.selfRank === 1, '查榜应 200 且自己第 1，实际 ' + r.status + ' ' + JSON.stringify(j));
+    ok(r.status === 200 && j.code === 0 && j.data && j.data.selfRank === 1, '查榜应 200 且自己第 1，实际 ' + r.status + ' ' + JSON.stringify(j));
 
     // 5) 查榜错误签名 -> 403
     r = await getRank('u1', now, 'bad');

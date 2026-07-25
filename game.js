@@ -4,6 +4,7 @@
 const Logic = require('./src/logic.js');
 const config = require('./config.js');
 const HMAC = require('./src/hmac.js'); // 纯 JS HMAC-SHA256（抖音运行时无 Node crypto）
+const Ladder = require('./src/ladder.js'); // 天梯（异步匹配）前端客户端 + Canvas UI
 
 const isTT = typeof tt !== 'undefined' && !!tt.createCanvas;
 let canvas = null;
@@ -34,6 +35,9 @@ const boardSize = Math.min(W, H) * 0.88;
 const cell = (boardSize - PAD * (SIZE + 1)) / SIZE;
 const boardX = (W - boardSize) / 2;
 const boardY = (H - boardSize) / 2 + 24;
+
+// 天梯 UI 布局（供 src/ladder.js 绘制使用，单一数据源）
+const L = { W, H, PAD, boardX, boardY, boardSize, cell };
 
 const COLORS = {
   2: '#eee4da', 4: '#ede0c8', 8: '#f2b179', 16: '#f59563', 32: '#f67c5f',
@@ -86,6 +90,17 @@ if (isTT) {
   } catch (e) { /* 用默认值 */ }
 }
 
+// ---------- 天梯（异步匹配 Phase 1）状态 ----------
+let ladderMatch = null;        // 结算卡数据 { matchId, myScore, opponent, result, diff, synthetic }
+let ladderLoading = false;     // 匹配请求中
+let ladderError = null;        // 匹配请求失败信息
+let ladderHist = null;         // 战绩数据：{ list, total }
+let ladderHistLoading = false;  // 战绩请求中
+let ladderHistError = null;    // 战绩请求失败信息
+let ladderScroll = 0;          // 战绩滚动偏移（像素）
+let lastMoveYL = 0;            // 战绩列表滑动上一帧 Y
+let moveSteps = 0;             // 本局步数（用于天梯匹配上报）
+
 // 对「uid|score|ts」做 HMAC 签名（仅当配置了 RANK_SECRET 时）
 function signScore(uid, score, ts) {
   if (!RANK_SECRET) return '';
@@ -107,6 +122,59 @@ function submitScore(s) {
       fail: () => {},
     });
   } catch (e) { /* noop */ }
+}
+
+// 天梯：在游戏结束时上报本局成绩并发起异步匹配，成功后弹出结算卡（screen='ladder'）
+function submitLadder(st) {
+  if (!isTT || !RANK_ENDPOINT) return;
+  try {
+    const ts = Math.floor(Date.now() / 1000);
+    const score = Math.floor(Number(st.score) || 0);
+    const steps = Math.floor(Number(moveSteps) || 0);
+    ladderLoading = true;
+    ladderError = null;
+    Ladder.fetchLadderMatch({
+      uid: rankUid, name: rankSelfName, score, steps, boardSummary: st.grid, ts,
+    }).then((resp) => {
+      if (resp && resp.code === 0 && resp.data) {
+        ladderMatch = resp.data;
+        ladderError = null;
+        screen = 'ladder';
+      } else {
+        ladderError = (resp && resp.message) || '天梯匹配失败';
+      }
+      ladderLoading = false;
+    }).catch(() => {
+      ladderError = '天梯请求失败，请检查网络';
+      ladderLoading = false;
+    });
+  } catch (e) { /* noop */ }
+}
+
+// 打开天梯战绩面板：拉取本人历史（screen='ladderHistory'）
+function openLadderHistory() {
+  if (!isTT || !RANK_ENDPOINT) {
+    ladderHistError = '未配置天梯地址：请在 config.js 填写 RANK_ENDPOINT';
+    ladderHistLoading = false;
+    return;
+  }
+  ladderHistLoading = true;
+  ladderHistError = null;
+  ladderHist = null;
+  ladderScroll = 0;
+  screen = 'ladderHistory';
+  Ladder.fetchLadderHistory(rankUid, 30).then((resp) => {
+    if (resp && resp.code === 0 && resp.data) {
+      ladderHist = resp.data;
+      ladderHistError = null;
+    } else {
+      ladderHistError = (resp && resp.message) || '战绩加载失败';
+    }
+    ladderHistLoading = false;
+  }).catch(() => {
+    ladderHistError = '战绩请求失败，请检查网络';
+    ladderHistLoading = false;
+  });
 }
 
 // 从云后端拉取榜单（前 100 + 自己名次）
@@ -274,7 +342,7 @@ function hideBanner() {
 }
 
 function watchRewardedThenRestart() {
-  const reset = () => { state = Logic.initGame(); screen = 'play'; hideBanner(); };
+  const reset = () => { state = Logic.initGame(); screen = 'play'; moveSteps = 0; hideBanner(); };
   if (!isTT || !REWARD_AD_ID) { reset(); return; }
   try {
     const ad = tt.createRewardedVideoAd({ adUnitId: REWARD_AD_ID });
@@ -286,6 +354,7 @@ function watchRewardedThenRestart() {
 function restart() {
   state = Logic.initGame();
   screen = 'play';
+  moveSteps = 0;
   hideBanner();
 }
 
@@ -293,15 +362,44 @@ function restart() {
 if (isTT) {
   let sx = 0;
   let sy = 0;
-  tt.onTouchStart((e) => {
-    sx = e.touches[0].clientX;
-    sy = e.touches[0].clientY;
-    lastMoveY = sy;
-  });
-  tt.onTouchEnd((e) => {
-    const t = e.changedTouches[0];
-    // 排行榜界面：关闭按钮优先判定（任何状态都可关），否则错误态点击重试
-    if (screen === 'rank') {
+tt.onTouchStart((e) => {
+  sx = e.touches[0].clientX;
+  sy = e.touches[0].clientY;
+  lastMoveY = sy;
+  lastMoveYL = sy;
+});
+tt.onTouchEnd((e) => {
+  const t = e.changedTouches[0];
+  // 天梯结算卡：关闭 × / 天梯历史 / 再来一局 / 看战绩（均为轻点判定）
+  if (screen === 'ladder') {
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+      // 关闭 × 优先（错误态也不能吞掉关闭）
+      const cr = Ladder.ladderCloseRect(L);
+      if (hit(cr, t)) { screen = 'play'; return; }
+      const hb = Ladder.ladderHistoryBtnRect(L);
+      if (hit(hb, t)) { openLadderHistory(); return; }
+      const ab = Ladder.ladderAgainBtnRect(L);
+      if (hit(ab, t)) { restart(); return; }
+      const rb = Ladder.ladderRecordsBtnRect(L);
+      if (hit(rb, t)) { openLadderHistory(); return; }
+      // 错误态：点任意处重试
+      if (ladderError) { submitLadder(state); return; }
+    }
+    return;
+  }
+  // 天梯战绩面板：关闭 × 优先，错误态点击重试
+  if (screen === 'ladderHistory') {
+    const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
+      const cr = Ladder.ladderHistCloseRect(L);
+      if (hit(cr, t)) { screen = 'play'; return; }
+      if (ladderHistError) { openLadderHistory(); return; }
+    }
+    return;
+  }
+  // 排行榜界面：关闭按钮优先判定（任何状态都可关），否则错误态点击重试
+  if (screen === 'rank') {
       const dx = t.clientX - sx, dy = t.clientY - sy;
       if (Math.abs(dx) < 12 && Math.abs(dy) < 12) {
         // 关闭按钮优先：错误态下也不能让「点哪都重试」吞掉关闭，否则榜单关不掉
@@ -343,6 +441,14 @@ if (isTT) {
         return;
       }
     }
+    // 天梯入口按钮（左上角，紧挨排行榜按钮右侧，避开系统胶囊）：命中即打开战绩面板
+    {
+      const lb = Ladder.ladderEntryBtnRect();
+      if (screen === 'play' && hit(lb, t)) {
+        openLadderHistory();
+        return;
+      }
+    }
     if (state.over) {
       watchRewardedThenRestart();
       return;
@@ -356,6 +462,7 @@ if (isTT) {
     const res = Logic.move(state, dir);
     if (res.moved) {
       state = res.state;
+      moveSteps += 1;
       if (res.merged && res.merged.length) {
         const cells = res.merged.map(([r, c]) => ({ r, c, val: state.grid[r][c] }));
         mergeFx.push({ cells, t0: Date.now() });
@@ -366,16 +473,21 @@ if (isTT) {
         // 合并时轻微震动（受震动开关控制），强化“撞击”手感
         try { if (vibrateOn && tt.vibrateShort) tt.vibrateShort({ type: 'light' }); } catch (e) { /* noop */ }
       }
-      if (state.over) { submitScore(state.score); showBanner(); }
+      if (state.over) { submitScore(state.score); showBanner(); submitLadder(state); }
     }
   });
 
   // 排行榜界面：拖动滚动列表（手指上滑 → 列表上滚 → rankScroll 增大）
   tt.onTouchMove((e) => {
-    if (screen !== 'rank') return;
+    if (screen !== 'rank' && screen !== 'ladderHistory') return;
     const ty = e.touches[0].clientY;
-    rankScroll += (lastMoveY - ty);
-    lastMoveY = ty;
+    if (screen === 'rank') {
+      rankScroll += (lastMoveY - ty);
+      lastMoveY = ty;
+    } else if (screen === 'ladderHistory') {
+      ladderScroll += (lastMoveYL - ty);
+      lastMoveYL = ty;
+    }
   });
 
   // 系统返回（Android 返回键 / iOS 返回手势）：排行榜界面消费返回事件，仅关闭榜单不退出小游戏。
@@ -384,9 +496,9 @@ if (isTT) {
   //   旧版：enableBackPressed(cb) 直接把回调当作参数
   // 回调返回 true = 消费事件（拦截，不退出）；false = 放行系统默认（退出小游戏）。
   const onBack = () => {
-    if (screen === 'rank') {
+    if (screen === 'rank' || screen === 'ladder' || screen === 'ladderHistory') {
       screen = 'play';
-      return true; // 消费返回事件，仅关闭排行榜
+      return true; // 消费返回事件，仅关闭弹层（排行榜 / 天梯结算 / 天梯战绩）
     }
     return false; // 游戏主界面走系统默认（退出小游戏）
   };
@@ -436,6 +548,12 @@ function cellCenter(r, c) {
 function vibrateToggleRect() {
   const w = 104, h = 30;
   return { x: W / 2 - w / 2, y: boardY + boardSize + 28, w, h };
+}
+
+// 点中判定：触摸点 t 是否落在矩形 r 内（天梯/排行榜按钮复用）
+function hit(r, t) {
+  return t.clientX >= r.x && t.clientX <= r.x + r.w &&
+         t.clientY >= r.y && t.clientY <= r.y + r.h;
 }
 
 function spawnParticles(r, c, val) {
@@ -641,6 +759,19 @@ function draw() {
     ctx.fillText('排行榜', rb.x + rb.w / 2, rb.y + rb.h / 2);
   }
 
+  // 天梯入口按钮（左上角，紧挨排行榜按钮右侧，避开系统胶囊），仅游戏进行中显示
+  if (screen === 'play') {
+    const lb = Ladder.ladderEntryBtnRect();
+    ctx.fillStyle = '#8f7a66';
+    roundRect(lb.x, lb.y, lb.w, lb.h, lb.h / 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('天梯', lb.x + lb.w / 2, lb.y + lb.h / 2);
+  }
+
   // 游戏结束遮罩
   if (state.over && screen === 'play') {
     ctx.fillStyle = 'rgba(250,248,239,0.80)';
@@ -681,6 +812,24 @@ function draw() {
 
   // 排行榜弹窗（覆盖在最上层）
   if (screen === 'rank') drawRank();
+
+  // 天梯结算卡（覆盖在最上层）
+  if (screen === 'ladder') drawLadder();
+  // 天梯战绩面板（覆盖在最上层）
+  if (screen === 'ladderHistory') drawLadderHistory();
+}
+
+// 天梯结算卡绘制（数据来自 ladderMatch / ladderLoading / ladderError）
+function drawLadder() {
+  Ladder.drawLadderCard(ctx, L, ladderMatch, { loading: ladderLoading, error: ladderError });
+}
+
+// 天梯战绩面板绘制（数据来自 ladderHist / ladderHistLoading / ladderHistError）
+function drawLadderHistory() {
+  const clamped = Ladder.drawLadderHistory(ctx, L, ladderHist, {
+    loading: ladderHistLoading, error: ladderHistError, scroll: ladderScroll,
+  });
+  ladderScroll = clamped;
 }
 
 let lastT = Date.now();
@@ -702,16 +851,23 @@ if (isTT) {
 
 // 测试钩子（仅供 QA 在 Node 下 require 验证；不影响抖音运行时）
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    _t: {
-      getScroll: () => rankScroll,
-      setScroll: (v) => { rankScroll = v; },
-      openRank,
-      isTT,
-      getScreen: () => screen,
-      getRankState: () => ({ loading: rankLoading, error: rankError, data: rankData, uid: rankUid, name: rankSelfName }),
-      setRankError: (v) => { rankError = v; },
-      rankBtnRect,
-    },
-  };
+    module.exports = {
+      _t: {
+        getScroll: () => rankScroll,
+        setScroll: (v) => { rankScroll = v; },
+        openRank,
+        isTT,
+        getScreen: () => screen,
+        getRankState: () => ({ loading: rankLoading, error: rankError, data: rankData, uid: rankUid, name: rankSelfName }),
+        setRankError: (v) => { rankError = v; },
+        rankBtnRect,
+        ladderEntryBtnRect: () => Ladder.ladderEntryBtnRect(),
+        openLadderHistory,
+        getLadderState: () => ({
+          screen,
+          match: ladderMatch, loading: ladderLoading, error: ladderError,
+          hist: ladderHist, histLoading: ladderHistLoading, histError: ladderHistError,
+        }),
+      },
+    };
 }

@@ -1,10 +1,14 @@
 // server/index.js
 // 零依赖 Node HTTP 服务（Vercel / 任意云函数 / 本地均可跑）。
 // 接口：
-//   POST /api/score   body: { uid, name, score, ts, sig }
-//                       -> 校验 HMAC 签名 + 时间戳 + 分数范围，记录最高分
+//   POST /api/score            body: { uid, name, score, ts, sig }
+//                               -> 校验 HMAC 签名 + 时间戳 + 分数范围，记录最高分
 //   GET  /api/rank?uid=xxx&limit=100&ts=xxx&sig=xxx
-//                       -> 校验签名后返回榜单视图
+//                               -> 校验签名后返回榜单视图
+//   POST /api/ladder/match     body: { uid, name, score, steps, boardSummary, ts, sig }
+//                               -> 异步天梯匹配（Phase 1）：写快照、匹配对手、比拼、写历史、返回结算
+//   GET  /api/ladder/history?uid=&limit=&ts=&sig=
+//                               -> 校验签名后返回本人天梯战绩
 //
 // 环境变量：
 //   RANK_SECRET         —— 签名密钥（前后端一致）。未设置则「开发模式」跳过验签（仅本地测试用）
@@ -14,8 +18,9 @@
 //   RANK_MAX_SCORE      —— 单局分数上限（防极端伪造，默认 10,000,000）
 //   SIGN_TTL            —— 签名有效期秒数（默认 300）
 const http = require('http');
-const crypto = require('crypto');
 const { createStore } = require('./store.js');
+const { verifyPayload } = require('./verify.js');
+const { LadderService } = require('./ladder.js');
 
 const RANK_SECRET = process.env.RANK_SECRET || '';
 const SIGN_TTL = parseInt(process.env.SIGN_TTL || '300', 10);
@@ -26,32 +31,39 @@ if (!RANK_SECRET) {
   console.warn('[rank-server] ⚠️ 未设置 RANK_SECRET：签名校验已关闭（仅限本地测试）。上线前务必设置随机密钥！');
 }
 
-// 验签：secret 为空（开发模式）直接通过；否则校验签名 + 时间窗
-function verifyPayload(payload, ts, sig) {
-  if (!RANK_SECRET) return true;
-  if (!sig || ts == null) return false;
-  const t = parseInt(ts, 10);
-  if (!Number.isFinite(t)) return false;
-  const now = Math.floor(Date.now() / 1000);
-  if (Math.abs(now - t) > SIGN_TTL) return false; // 过期 / 重放
-  const expected = crypto.createHmac('sha256', RANK_SECRET).update(payload).digest('hex');
-  const a = Buffer.from(expected);
-  const b = Buffer.from(String(sig));
-  if (a.length !== b.length) return false;
-  try { return crypto.timingSafeEqual(a, b); } catch (e) { return false; }
+// 统一 JSON 发送（含 CORS，沿用现有约定）
+function sendJson(res, code, obj) {
+  res.writeHead(code, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  });
+  res.end(JSON.stringify(obj));
 }
+
+// 天梯服务（复用全局 store 与 verify）
+const ladder = new LadderService(store, { verifyPayload, maxScore: RANK_MAX_SCORE, send: sendJson });
 
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  const send = (code, obj) => {
-    res.writeHead(code, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(obj));
-  };
+  const send = (code, obj) => sendJson(res, code, obj);
 
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+  // ---------- 天梯路由（Phase 1） ----------
+  // POST /api/ladder/match
+  if (req.method === 'POST' && req.url.startsWith('/api/ladder/match')) {
+    return ladder.match(req, res);
+  }
+  // GET /api/ladder/history
+  if (req.method === 'GET' && req.url.startsWith('/api/ladder/history')) {
+    return ladder.getHistory(req, res);
+  }
+
+  // ---------- 旧接口（行为不变） ----------
   // POST /api/score
   if (req.method === 'POST' && req.url.startsWith('/api/score')) {
     let body = '';

@@ -76,9 +76,14 @@ class LadderService {
 
     // 1) 参数校验
     if (!uid) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'uid required' });
+    // 必填字段 score 缺失：按架构约定（docs/system_design.md §7）返回 code 1（PARAM）。
+    // 用 == null 而非 falsy，以保留 score=0 这一合法分数值。
+    if (score == null) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score required' });
     const sc = Math.floor(Number(score) || 0);
+    // Number(score) 转换后若为 NaN（如非数字字符串），同样视为缺失并按 code 1 拒绝
+    if (!Number.isFinite(sc)) return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score required' });
     const st = Math.floor(Number(steps) || 0);
-    if (!Number.isFinite(sc) || sc < 0 || sc > this.maxScore) {
+    if (sc < 0 || sc > this.maxScore) {
       return this.send(res, 400, { code: CODE.PARAM, data: null, message: 'score out of range' });
     }
     if (!Number.isFinite(st) || st < 0) {

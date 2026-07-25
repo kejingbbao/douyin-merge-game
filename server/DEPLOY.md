@@ -131,3 +131,63 @@ curl https://merge-rank-server-xxx.vercel.app/api/rank?uid=selftest&ts=$(date +%
 - **图 1｜Import & Configure**：Import 仓库 → Framework 选 Other → Build 留空 → 展开 Environment Variables。
 - **图 2｜Environment Variables**：4 条变量逐项 Add，Environment 全勾；Deploy 后在 Settings 复核。
 - **图 3｜拿域名 & 填前端**：Deployments 复制 `*.vercel.app` → `config.js` 的 `RANK_ENDPOINT` 填 `域名/api`、`RANK_SECRET` 填同串。
+
+---
+
+## 8. 故障复盘 / 坑位（生产化真踩过的坑）
+
+> 以下两节是 `.cn` 生产化与 Upstash 改造过程中真实踩到的坑，供后续部署/维护对照，避免重蹈覆辙。部署步骤章节（0–7）不受影响。
+
+### 8.1 `.cn` 自定义域名 + EdgeOne 收口（生产化）
+
+**是什么**：用国内自定义域名 `kejingbbao.cn` 收口 Vercel 后端，绕开 `.vercel.app` 域名在抖音侧的稳定性问题，并借 EdgeOne 做免备案当天可用的加速。
+
+**配置链路（已落地）**：
+
+- 域名 `kejingbbao.cn` 已在腾讯云 DNSPod 注册 + 实名。
+- Vercel 绑定 `kejingbbao.cn` 与 `www.kejingbbao.cn`，两者状态均为 **Valid Configuration（双绿）**。
+- DNSPod 解析由 **EdgeOne 托管接入** 自动接管：`@`（根域名）与 `www` 的 CNAME 均指向 `*.eo.dnse1.com`。
+- EdgeOne 配置：
+  - 套餐：个人版（¥29.9/年）
+  - 加速区域：**全球可用区（不含中国大陆）** —— 免 ICP 备案、当天可用
+  - 两条加速域名源站均填 `cname.vercel-dns.com`
+  - 模板：API 加速
+  - 强制 HTTPS（302 跳转）
+- 抖音开放平台：request 合法域名已加 `https://kejingbbao.cn`。
+- `config.js` 的 `RANK_ENDPOINT` 已切到 `https://kejingbbao.cn/api`
+  （`config.js` 被 `.gitignore` 忽略，**不入库**）。
+
+**为什么这么做**：`.vercel.app` 在某些网络/抖音环境下不稳定；`.cn` + EdgeOne 全球加速区可当天生效且不用等备案，先把链路跑通。
+
+**待办 / 提醒**：
+
+- ICP 备案通过后，可一键把 EdgeOne 加速区域从「全球（不含中国大陆）」切到「境内 + 全球」，拉满国内速度。
+  - 备案需买一台境内轻量服务器做接入，周期约 1–2 周。
+- `config.js` 是**本地配置、不进版本库**：换机器部署需重新填 `RANK_ENDPOINT` / `RANK_SECRET`，别指望 git 拉下来就有。
+
+### 8.2 Upstash REST `rcmd` 必须发「裸 JSON 数组」的坑（血泪）
+
+**是什么**：把 Redis 命令从 URL 路径拼接改成 POST body 时，body 格式写错，导致线上 `.cn` 一度全挂。
+
+**现象**：body 写成 `{"command":[...]}` 对象时，Upstash 返回 `expected JSON array`，**每一个**命令失败，连锁拖垮排行榜 / 天梯 / 房间（线上 `.cn` 一度全挂）。
+
+**为什么（根因）**：Upstash REST API 的 POST body **必须是裸 JSON 数组** `["GET","key",...]`，不是对象；命令参数需全部转字符串。
+
+**正确写法**（`server/store.js` 的 `rcmd`）：
+
+```js
+fetch(url, {
+  method: 'POST',
+  headers: {
+    Authorization: 'Bearer ' + token,
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify(args.map(String)), // ← 裸数组 + 全转字符串
+});
+```
+
+**验证**：单测 `test/store-upstash.test.js` 已断言请求体是 `Array.isArray(body)` 且元素全为 string、`body[0] === 'GET'`（或对应命令）。
+
+> ⚠️ 此前假 fetch 按 `body.command` 解析，导致「假绿」掩盖真 bug —— 单测全过、线上全崩。现已修正为假 fetch 解析 `JSON.parse(opts.body)` 的裸数组。
+
+**教训**：Upstash 客户端 + 假 fetch 单测要**逐字节对齐真实请求形态**，否则单测全绿线上崩。

@@ -1,0 +1,89 @@
+%% 合成能量 · 多人对战 类图 / 数据模型
+%% 渲染：VS Code Mermaid 插件 / mermaid.live
+
+classDiagram
+    direction LR
+
+    class OpponentSnapshot {
+        +string uid
+        +string name
+        +number score
+        +number steps
+        +string boardSummary
+        +number ts
+        +boolean synthetic
+    }
+
+    class MatchRecord {
+        +string matchId
+        +string uid
+        +number myScore
+        +string oppName
+        +number oppScore
+        +string result
+        +number diff
+        +boolean synthetic
+        +number ts
+    }
+
+    class Room {
+        +string code
+        +number seed
+        +string status
+        +number createdAt
+        +number ttl
+        +object players
+        +object results
+    }
+
+    class PlayerState {
+        +string uid
+        +string name
+        +boolean ready
+        +number score
+        +number steps
+        +string boardSummary
+        +number updatedAt
+    }
+
+    class ResultState {
+        +string uid
+        +number score
+        +number steps
+        +number ts
+    }
+
+    class LadderService {
+        +match(req) MatchResult
+        +getHistory(uid, limit) MatchRecord[]
+        -findOpponent(score, uid, band) OpponentSnapshot
+        -makeSynthetic(score) OpponentSnapshot
+        -calcResult(my, opp) string
+    }
+
+    class RoomService {
+        +create(uid, name) Room
+        +join(code, uid, name) Room
+        +progress(code, uid, p) void
+        +getState(code, uid) RoomView
+        +submitResult(code, uid, r) void
+    }
+
+    class Store {
+        <<interface>>
+        +recordScore(uid, name, score)
+        +getRankView(uid, limit)
+        +saveSnapshot(s)
+        +matchSnapshot(score, uid, band)
+        +pushHistory(uid, rec)
+        +getHistory(uid, limit)
+        +roomSet(code, room)
+        +roomGet(code) Room
+        +roomProgress(code, uid, p)
+    }
+
+    LadderService ..> Store : uses
+    RoomService ..> Store : uses
+    Room "1" *-- "2" PlayerState
+    Room "1" *-- "2" ResultState
+    MatchRecord ..> OpponentSnapshot : 展示对手

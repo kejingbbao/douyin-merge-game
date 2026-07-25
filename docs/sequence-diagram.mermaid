@@ -1,0 +1,64 @@
+%% 合成能量 · 多人对战 时序图（Phase 1 天梯 + Phase 2 房间）
+%% 渲染：VS Code Mermaid 插件 / mermaid.live
+
+%% ===== Phase 1 天梯一局流程 =====
+sequenceDiagram
+    participant C as 抖音Canvas客户端
+    participant S as /api/score
+    participant L as /api/ladder/match
+    participant DB as Upstash Redis
+
+    Note over C: 本局结束，得 score / steps / boardSummary
+    C->>S: POST /api/score {uid,name,score,ts,sig}
+    S->>S: verifyPayload(HMAC, 复用)
+    S->>DB: 写榜单(rank:board / rank:meta)
+    S-->>C: {ok:true}
+
+    C->>L: POST /api/ladder/match {uid,name,score,steps,boardSummary,ts,sig}
+    L->>L: verifyPayload(uid|score|steps|ts)
+    L->>DB: ZADD ladder:snapshots 写本人快照
+    L->>DB: ZRANGEBYSCORE 取相近分数候选(排除自己)
+    alt 命中候选
+        DB-->>L: 对手快照
+    else 无候选(空池)
+        L->>L: makeSynthetic(score) 生成合成对手
+    end
+    L->>L: calcResult(my,opp) → win/loss/draw + diff
+    L->>DB: LPUSH ladder:history:{uid} 写战绩
+    L-->>C: {code:0, data:{opponent,result,diff,matchId}}
+    C->>C: Canvas 渲染"你 vs 对手"结算卡
+    C->>C: 关闭×(左上)/历史按钮(左上, 避胶囊)
+
+%% ===== Phase 2 房间对战流程（Upstash + 轮询，替代 WS） =====
+sequenceDiagram
+    participant P1 as 玩家1(抖音)
+    participant P2 as 玩家2(抖音)
+    participant API as Vercel /api/room/*
+    participant DB as Upstash Redis(状态总线)
+
+    P1->>API: POST /api/room/create {uid,name,sig}
+    API->>DB: 建房间(code, seed, TTL=600s)
+    API-->>P1: {code:"A1B2C3", seed}
+
+    P2->>API: POST /api/room/join {code,uid,name,sig}
+    API->>DB: 加入房间(上限2), 分配相同 seed
+    API-->>P2: {seed, players}
+
+    P1->>P1: 用 seed 开局(同房同随机种子)
+    P2->>P2: 用 seed 开局
+
+    loop 每步/定时(轮询约1.5s)
+        P1->>API: POST /api/room/progress {score,steps,summary}
+        API->>DB: HSET room:{code} player:p1
+        P1->>API: GET /api/room/state (轮询)
+        API->>DB: 读对手进度
+        API-->>P1: {opponent:{score,steps}}
+        P2 同理(对称)
+    end
+
+    P1->>API: POST /api/room/result {score,steps}
+    P2->>API: POST /api/room/result {score,steps}
+    API->>DB: 双方结果齐 → 计算胜负, 写 results
+    P1->>API: GET /api/room/state (轮询)
+    API-->>P1: {matchResult:win/loss/draw}
+    P1->>P1: Canvas 渲染房间结算

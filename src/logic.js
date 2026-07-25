@@ -106,15 +106,26 @@ function move(state, direction, rng) {
     newRows.push(row);
   }
 
-  if (!moved) return { moved: false };
+  // 棋盘未变：仍需判定是否已无路可走（满格且无相邻可合并）
+  if (!moved) {
+    return { moved: false, over: !canMove(state.grid) };
+  }
 
   const t = (4 - times) % 4;
   const newGrid = rotate(newRows, t);
   const merged = mergedRot.map(([r, c]) => mapCoord(r, c, t));
   const score = state.score + gainedTotal;
-  const over = !canMove(newGrid);
-  const newState = { grid: newGrid, score, over };
-  if (!over) spawnTile(newState.grid, rng);
+
+  // 移动后已无路可走（满格且无相邻可合并）：直接判负，不生成新棋子
+  if (!canMove(newGrid)) {
+    const newState = { grid: newGrid, score, over: true };
+    return { moved: true, state: newState, gained: gainedTotal, merged };
+  }
+
+  // 仍可继续：生成新棋子，并重新判定生成后是否恰好满格死局
+  const newState = { grid: newGrid, score };
+  spawnTile(newState.grid, rng);
+  newState.over = !canMove(newState.grid);
   return { moved: true, state: newState, gained: gainedTotal, merged };
 }
 

@@ -574,6 +574,10 @@ tt.onTouchEnd((e) => {
         moveSteps += 1;
         applyMoveFx(res);
         if (state.over) { triggerGameOver(); }
+      } else if (res.over) {
+        // 棋盘已无路可走（满格且无相邻可合并），本次滑动未改变棋盘 → 判负
+        state = Object.assign({}, state, { over: true });
+        triggerGameOver();
       }
   });
 

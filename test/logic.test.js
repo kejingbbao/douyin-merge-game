@@ -53,6 +53,7 @@ const full = [
 ];
 r = L.move({ grid: full, score: 0, over: false }, 'left');
 ok(r.moved === false, '满盘无合并应 moved=false');
+ok(r.over === true, '满盘无相邻相等应 over=true（满格死局必须判负）');
 
 // canMove 判定
 ok(L.canMove(full) === false, '满盘无相邻相等 -> canMove=false');

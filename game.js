@@ -143,12 +143,11 @@ function openRank() {
 }
 
 function rankBtnRect() {
-  return { x: W - 86, y: 16, w: 74, h: 30 };
+  // 左上角，避开抖音小游戏右上角的系统胶囊按钮（菜单/关闭）
+  return { x: 12, y: 16, w: 74, h: 30 };
 }
 function rankPanelRect() {
-  // 左抽屉：贴屏幕左边，占屏宽约 82%，右侧露出被压暗的游戏画面
-  const w = Math.round(W * 0.82);
-  return { x: 0, y: 56, w, h: H - 56 - 24 };
+  return { x: PAD, y: 56, w: W - PAD * 2, h: H - 56 - 24 };
 }
 function rankCloseRect() {
   // 放在面板左上角，避开抖音小游戏右上角的系统胶囊按钮（菜单/关闭），保证可点
@@ -169,10 +168,10 @@ function drawRank() {
   // 标题
   ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = 'bold 20px sans-serif';
-  ctx.fillText('全球排行榜 · 前 100 名', p.x + p.w / 2, p.y + 30);
+  ctx.fillText('全球排行榜 · 前 100 名', W / 2, p.y + 30);
   // 关闭提示：系统返回键或左上角 × 均可关闭
   ctx.fillStyle = '#bbada0'; ctx.font = '12px sans-serif';
-  ctx.fillText('系统返回键 / × 关闭', p.x + p.w / 2, p.y + 48);
+  ctx.fillText('系统返回键 / × 关闭', W / 2, p.y + 48);
   // 关闭按钮（×）
   const cr = rankCloseRect();
   ctx.strokeStyle = '#bbada0'; ctx.lineWidth = 2;
@@ -185,23 +184,23 @@ function drawRank() {
   if (rankLoading) {
     ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '16px sans-serif';
-    ctx.fillText('榜单加载中…', p.x + p.w / 2, p.y + p.h / 2);
+    ctx.fillText('榜单加载中…', W / 2, p.y + p.h / 2);
     return;
   }
   // 出错
   if (rankError) {
     ctx.fillStyle = '#c0392b'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '15px sans-serif';
-    ctx.fillText(rankError, p.x + p.w / 2, p.y + p.h / 2 - 12);
+    ctx.fillText(rankError, W / 2, p.y + p.h / 2 - 12);
     ctx.fillStyle = '#8f7a66'; ctx.font = 'bold 15px sans-serif';
-    ctx.fillText('点击任意处重试', p.x + p.w / 2, p.y + p.h / 2 + 16);
+    ctx.fillText('点击任意处重试', W / 2, p.y + p.h / 2 + 16);
     return;
   }
   // 无数据
   if (!rankData) {
     ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = '16px sans-serif';
-    ctx.fillText('暂无数据', p.x + p.w / 2, p.y + p.h / 2);
+    ctx.fillText('暂无数据', W / 2, p.y + p.h / 2);
     return;
   }
 

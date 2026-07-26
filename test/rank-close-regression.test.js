@@ -31,7 +31,7 @@ const fakeCanvas = { width: 0, height: 0, getContext: () => fakeCtx };
 global.tt = {
   createCanvas: () => fakeCanvas,
   getSystemInfoSync: () => ({ windowWidth: 375, windowHeight: 667, pixelRatio: 2 }),
-  getStorageSync: () => '',
+  getStorageSync: (k) => (k === 'privacyAgreed' ? '1' : ''),
   setStorageSync: () => {},
   vibrateShort: () => {},
   onTouchStart: (fn) => { touchStart = fn; },

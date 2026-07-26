@@ -22,7 +22,7 @@ const fakeCanvas = {
 global.tt = {
   createCanvas: () => fakeCanvas,
   getSystemInfoSync: () => ({ windowWidth: 375, windowHeight: 667, pixelRatio: 2 }),
-  getStorageSync: (k) => (k in store ? store[k] : undefined),
+  getStorageSync: (k) => (k === 'privacyAgreed' ? '1' : (k in store ? store[k] : undefined)),
   setStorageSync: ({ key, data }) => { store[key] = data; },
   setUserCloudStorage: () => {},
   getOpenDataContext: () => null, // 返回 null -> 走本地模拟榜路径

@@ -66,6 +66,25 @@ if (isTT && tt.getStorageSync) {
   } catch (e) { /* 用默认值 */ }
 }
 
+// ---------- 隐私政策弹窗（抖音提审合规：首次运行前弹窗提示 + ≤4 次点击常驻入口） ----------
+let privacyModalOpen = false;   // 是否显示隐私弹窗（覆盖所有界面之上，最高优先级拦截触摸）
+let privacyViewDetail = false;  // 是否处于「查看详情」子页
+let privacyFirstRun = false;    // 首次运行且尚未同意：返回键保持弹窗、游戏不开始
+let privacyAgreed = false;      // 本地是否已同意（持久化标记）
+
+// 读取同意标记：优先用 tt.getStorageSync('privacyAgreed')；非抖音/无 API 环境安全降级（不崩）
+try {
+  if (isTT && typeof tt.getStorageSync === 'function') {
+    privacyAgreed = tt.getStorageSync('privacyAgreed') === '1';
+  }
+} catch (e) { /* 无存储能力时按未同意处理，弹窗仍会在首次运行显示 */ }
+
+// 未同意 → 首次运行即阻断游戏，先显示隐私弹窗
+if (!privacyAgreed) {
+  privacyModalOpen = true;
+  privacyFirstRun = true;
+}
+
 // ---------- 排行榜（自建云后端，全球榜） ----------
 const RANK_ENDPOINT = config.RANK_ENDPOINT;
 const RANK_SECRET = config.RANK_SECRET || ''; // 防刷分签名密钥；为空则不上传签名（本地联调用）
@@ -242,6 +261,121 @@ function rankCloseRect() {
   // 放大到 38px 并多留内边距，降低角落按钮误触/点不中的概率
   const p = rankPanelRect();
   return { x: p.x + 8, y: p.y + 8, w: 38, h: 38 };
+}
+
+// ---------- 隐私政策弹窗（Canvas 绘制 + 命中矩形，风格同排行榜遮罩） ----------
+function privacyPanelRect() {
+  // 居中半透明面板，固定安全尺寸，避开顶部系统胶囊
+  const w = Math.min(W - PAD * 2, 320);
+  const h = Math.min(H * 0.8, 470);
+  return { x: (W - w) / 2, y: (H - h) / 2, w, h };
+}
+function privacyAgreeRect() {
+  const p = privacyPanelRect();
+  const gap = 16;
+  const bw = (p.w - gap * 3) / 2;
+  const bh = 44;
+  const by = p.y + p.h - bh - 18;
+  return { x: p.x + gap, y: by, w: bw, h: bh };
+}
+function privacyDeclineRect() {
+  const p = privacyPanelRect();
+  const gap = 16;
+  const bw = (p.w - gap * 3) / 2;
+  const bh = 44;
+  const by = p.y + p.h - bh - 18;
+  return { x: p.x + gap + bw + gap, y: by, w: bw, h: bh };
+}
+function privacyDetailRect() {
+  const p = privacyPanelRect();
+  return { x: p.x + 16, y: p.y + p.h - 110, w: p.w - 32, h: 30 };
+}
+function privacyBackRect() {
+  // 左上角返回（避开系统胶囊，同 rankCloseRect 风格）
+  const p = privacyPanelRect();
+  return { x: p.x + 8, y: p.y + 8, w: 38, h: 38 };
+}
+// 游戏内常驻入口按钮（首页/游戏内底部居中，≤4 次点击可达）
+function privacyEntryBtnRect() {
+  const w = 110, h = 30;
+  return { x: W / 2 - w / 2, y: boardY + boardSize + 66, w, h };
+}
+
+// 隐私政策要点（从 docs/privacy-policy.md / docs/user-agreement.md 抽取核心条款）
+const PRIVACY_DETAIL_POINTS = [
+  '· 仅在最小必要范围收集信息（设备与对局数据），用于提供游戏、对战匹配与排行榜。',
+  '· 不收集通讯录、位置、相册、摄像头等与玩法无关的敏感信息。',
+  '· 数据存于云端，传输全程 HTTPS，分数上报带 HMAC 签名防刷分。',
+  '· 您可随时查询、更正、删除本人数据或撤回授权（详见游戏内/官网政策）。',
+  '· 含实时房间对战，未成年须实名并遵守防沉迷（时长限制与禁玩时段）。',
+];
+
+function drawPrivacyModal() {
+  const p = privacyPanelRect();
+  // 遮罩
+  ctx.fillStyle = 'rgba(0,0,0,0.72)';
+  ctx.fillRect(0, 0, W, H);
+  // 面板
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 20; ctx.shadowOffsetY = 6;
+  ctx.fillStyle = '#faf8ef';
+  roundRect(p.x, p.y, p.w, p.h, 16); ctx.fill();
+  ctx.restore();
+
+  if (privacyViewDetail) {
+    // 详情子页：返回 ×
+    const br = privacyBackRect();
+    ctx.strokeStyle = '#bbada0'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(br.x + 10, br.y + 10); ctx.lineTo(br.x + br.w - 10, br.y + br.h - 10);
+    ctx.moveTo(br.x + br.w - 10, br.y + 10); ctx.lineTo(br.x + 10, br.y + br.h - 10);
+    ctx.stroke();
+    // 标题
+    ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 19px sans-serif';
+    ctx.fillText('隐私政策要点', W / 2, p.y + 30);
+    // 要点（左对齐，自动换行，不依赖 ctx.measureText，mock 环境安全）
+    ctx.fillStyle = '#776e65'; ctx.font = '13px sans-serif'; ctx.textAlign = 'left';
+    const tx = p.x + 18;
+    let ty = p.y + 64;
+    const lh = 22;
+    for (const pt of PRIVACY_DETAIL_POINTS) {
+      const lines = wrapText(pt, p.w - 36, '13px sans-serif');
+      for (const ln of lines) { ctx.fillText(ln, tx, ty); ty += lh; }
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#bbada0'; ctx.font = '12px sans-serif';
+    ctx.fillText('完整政策见游戏内 / 官网', W / 2, p.y + p.h - 16);
+    return;
+  }
+
+  // 主弹窗：标题
+  ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('隐私政策与用户协议', W / 2, p.y + 30);
+  // 说明文字
+  ctx.fillStyle = '#776e65'; ctx.font = '13px sans-serif'; ctx.textAlign = 'left';
+  const desc = '我们依据《隐私政策》《用户协议》收集必要信息以提供游戏服务，点击同意即表示你已阅读并同意上述条款。';
+  const dlines = wrapText(desc, p.w - 36, '13px sans-serif');
+  let dy = p.y + 62;
+  for (const ln of dlines) { ctx.fillText(ln, p.x + 18, dy); dy += 20; }
+  // 查看详情 文字链接
+  const dr = privacyDetailRect();
+  ctx.fillStyle = '#8f7a66'; ctx.font = 'bold 14px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('查看详情 ›', dr.x + dr.w / 2, dr.y + dr.h / 2);
+  // 暂不同意（次按钮）
+  const cr = privacyDeclineRect();
+  ctx.fillStyle = '#cdc1b4';
+  roundRect(cr.x, cr.y, cr.w, cr.h, cr.h / 2); ctx.fill();
+  ctx.fillStyle = '#776e65'; ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('暂不同意', cr.x + cr.w / 2, cr.y + cr.h / 2);
+  // 同意并继续 / 我已阅读（主按钮）
+  const ar = privacyAgreeRect();
+  ctx.fillStyle = '#edc22e';
+  roundRect(ar.x, ar.y, ar.w, ar.h, ar.h / 2); ctx.fill();
+  ctx.fillStyle = '#5b4a1f'; ctx.font = 'bold 15px sans-serif';
+  ctx.fillText(privacyFirstRun ? '同意并继续' : '我已阅读', ar.x + ar.w / 2, ar.y + ar.h / 2);
 }
 
 function drawRank() {
@@ -435,6 +569,30 @@ tt.onTouchStart((e) => {
 });
 tt.onTouchEnd((e) => {
   const t = e.changedTouches[0];
+  // 隐私政策弹窗：最高优先级，覆盖游戏内其它所有触摸
+  if (privacyModalOpen) {
+    if (privacyViewDetail) {
+      if (hit(privacyBackRect(), t)) { privacyViewDetail = false; return; }
+      return; // 详情页仅返回键有效，其它区域阻断
+    }
+    if (hit(privacyAgreeRect(), t)) {
+      if (privacyFirstRun) {
+        try {
+          if (isTT && typeof tt.setStorageSync === 'function') tt.setStorageSync('privacyAgreed', '1');
+        } catch (e2) { /* 写入失败不影响关闭 */ }
+        privacyAgreed = true;
+      }
+      privacyModalOpen = false;
+      privacyFirstRun = false;
+      return;
+    }
+    if (hit(privacyDeclineRect(), t)) {
+      if (!privacyFirstRun) privacyModalOpen = false; // 查看模式可关闭；首次未同意保持弹窗
+      return;
+    }
+    if (hit(privacyDetailRect(), t)) { privacyViewDetail = true; return; }
+    return; // 弹窗打开时阻断游戏内触摸
+  }
   // 天梯结算卡：关闭 × / 天梯历史 / 再来一局 / 看战绩（均为轻点判定）
   if (screen === 'ladder') {
     const dx = t.clientX - sx, dy = t.clientY - sy;
@@ -486,6 +644,16 @@ tt.onTouchEnd((e) => {
     }
     return;
   }
+    // 隐私政策常驻入口（首页/游戏内，≤4 次点击可达）：命中即打开弹窗（查看模式）
+    {
+      const pe = privacyEntryBtnRect();
+      if ((screen === 'play' || screen === 'guide') && hit(pe, t)) {
+        privacyModalOpen = true;
+        privacyViewDetail = false;
+        privacyFirstRun = false; // 查看模式：不强制改存储标记
+        return;
+      }
+    }
     if (screen === 'guide') {
       const bx = W / 2 - 80, by = H / 2 + 60, bw = 160, bh = 48;
       if (t.clientX >= bx && t.clientX <= bx + bw && t.clientY >= by && t.clientY <= by + bh) {
@@ -605,6 +773,13 @@ tt.onTouchEnd((e) => {
   //   旧版：enableBackPressed(cb) 直接把回调当作参数
   // 回调返回 true = 消费事件（拦截，不退出）；false = 放行系统默认（退出小游戏）。
   const onBack = () => {
+    // 隐私政策弹窗：返回键优先处理（返回/保持弹窗，不退出游戏）
+    if (privacyModalOpen) {
+      if (privacyViewDetail) { privacyViewDetail = false; return true; } // 退回主弹窗
+      if (privacyFirstRun) return true; // 首次未同意：保持弹窗，不退出
+      privacyModalOpen = false; // 查看模式：返回即关闭弹窗
+      return true;
+    }
     if (screen === 'rank' || screen === 'ladder' || screen === 'ladderHistory') {
       screen = 'play';
       return true; // 消费返回事件，仅关闭弹层（排行榜 / 天梯结算 / 天梯战绩）
@@ -637,6 +812,21 @@ function roundRect(x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+// 按字号估算换行（不依赖 ctx.measureText，保证 mock 环境下不崩）；用于隐私弹窗长文本
+function wrapText(text, maxWidth, font) {
+  const fontSize = parseInt(font, 10) || 13;
+  const approxCharW = fontSize * 0.62; // 中英文混合平均宽度估计
+  const maxChars = Math.max(6, Math.floor(maxWidth / approxCharW));
+  const lines = [];
+  let cur = '';
+  for (const ch of text) {
+    cur += ch;
+    if (cur.length >= maxChars) { lines.push(cur); cur = ''; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
 }
 
 // 把十六进制颜色提亮 amt(0~1)，返回 rgb 字符串，供火花/光晕使用
@@ -974,6 +1164,16 @@ function draw() {
     ctx.fillText('开始游戏', W / 2, by + bh / 2);
   }
 
+  // 隐私政策常驻入口（首页/游戏内可见，≤4 次点击可达）
+  if (screen === 'play' || screen === 'guide') {
+    const pe = privacyEntryBtnRect();
+    ctx.fillStyle = '#8f7a66';
+    roundRect(pe.x, pe.y, pe.w, pe.h, pe.h / 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('隐私政策', pe.x + pe.w / 2, pe.y + pe.h / 2);
+  }
+
   // 排行榜弹窗（覆盖在最上层）
   if (screen === 'rank') drawRank();
 
@@ -983,6 +1183,9 @@ function draw() {
   if (screen === 'ladderHistory') drawLadderHistory();
   // 房间对战 UI（覆盖在最上层；screen==='room' 时由 Room 接管绘制）
   if (screen === 'room') { Room.setStateRef(state); Room.render(ctx, L); }
+
+  // 隐私政策弹窗（覆盖在最上层，最高优先级）
+  if (privacyModalOpen) drawPrivacyModal();
 }
 
 // 天梯结算卡绘制（数据来自 ladderMatch / ladderLoading / ladderError）
@@ -1033,6 +1236,16 @@ if (typeof module !== 'undefined' && module.exports) {
         getRankState: () => ({ loading: rankLoading, error: rankError, data: rankData, uid: rankUid, name: rankSelfName }),
         loseGame: () => { state.over = true; if (isTT) triggerGameOver(); },
         setRankError: (v) => { rankError = v; },
+        // ---- 隐私政策弹窗 QA 钩子 ----
+        getPrivacyModalOpen: () => privacyModalOpen,
+        getPrivacyViewDetail: () => privacyViewDetail,
+        getPrivacyFirstRun: () => privacyFirstRun,
+        getPrivacyAgreed: () => privacyAgreed,
+        privacyAgreeRect,
+        privacyDeclineRect,
+        privacyDetailRect,
+        privacyBackRect,
+        privacyEntryBtnRect,
         rankBtnRect,
         rankCloseRect, // QA 钩子：返回排行榜关闭 × 的屏幕矩形，供回归测试按真实生产坐标驱动 touch
         getRankReturnScreen: () => rankReturnScreen, // QA 钩子：返回打开榜单时记录的来源界面

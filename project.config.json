@@ -1,1 +1,1 @@
-{"appid":"tt622d1490fc48779502","projectname":"merge-energy","setting":{"es6":true,"minified":false}}
+{"appid": "tt622d1490fc48779502", "projectname": "merge-energy", "setting": {"es6": true, "minified": false}, "packOptions": {"ignore": [{"type": "folder", "value": "test"}, {"type": "folder", "value": "tools"}, {"type": "folder", "value": "docs"}, {"type": "folder", "value": "server"}, {"type": "suffix", "value": ".md"}, {"type": "file", "value": "config.example.js"}]}}

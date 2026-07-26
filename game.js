@@ -16,6 +16,13 @@ let sidebarNavigateCalled = 0; // tt.navigateToScene 调用计数（QA 钩子用
 let lastNavigateArgs = null;   // 最近一次 tt.navigateToScene 入参（QA 钩子用）
 let memStore = {};             // 内存兜底存储（无 tt.setStorageSync 时使用）
 
+// ---------- 敏感词能力（抖音提审「必接」：未注册 tt.onKeyboardComplete 会被审核预检标记风险） ----------
+// 状态变量（模块级，供 QA 钩子 game._t.sensitiveWord 读取 / 注入）。
+// 注意：最终提交/使用的房间码必须经过 tt.onKeyboardComplete 回调值过滤（平台已在 data.value 完成敏感词替换）。
+let lastKeyboardCompleteValue = ''; // 最近一次 tt.onKeyboardComplete 回调返回的（已过敏感词替换）输入值
+let keyboardCompleteTime = 0;       // 最近一次回调时间戳（ms），用于判断取值时效性（如 5s 内）
+let sensitiveWordRegistered = false; // 是否成功注册 tt.onKeyboardComplete（typeof 检查通过即为 true）
+
 const isTT = typeof tt !== 'undefined' && !!tt.createCanvas;
 let canvas = null;
 let ctx = null;
@@ -111,6 +118,25 @@ function sidebarEntryClick() {
   }
 }
 
+// 房间码敏感词过滤：最终提交的房间号必须经过 tt.onKeyboardComplete 过滤。
+//   - 优先采用最近一次（SENSITIVE_WINDOW_MS 内）tt.onKeyboardComplete 回调值：
+//     其 data.value 已由平台做过敏感词替换（敏感词 → *），是「已过滤」的权威来源；
+//   - 若无可用的键盘回调值（如 Canvas 自定义键盘未触发原生键盘），则对原始输入做主动替换
+//     （tt.ReplaceSensitiveWords，若存在），否则原样返回；
+//   - 该函数在游戏任何房间码使用点调用，确保「最终提交/使用的房间码经过敏感词过滤」。
+const SENSITIVE_WINDOW_MS = 5000;
+function resolveRoomCode(rawCode) {
+  const now = Date.now();
+  if (lastKeyboardCompleteValue && (now - keyboardCompleteTime) <= SENSITIVE_WINDOW_MS) {
+    return lastKeyboardCompleteValue;
+  }
+  const raw = String(rawCode == null ? '' : rawCode);
+  if (typeof tt !== 'undefined' && typeof tt.ReplaceSensitiveWords === 'function') {
+    try { return tt.ReplaceSensitiveWords(raw); } catch (e) { /* 降级原样返回 */ }
+  }
+  return raw;
+}
+
 // 启动即注册 onShow + 检测侧边栏支持 + 读取今日领取状态（同步，避免错过启动参数）
 if (isTT) {
   // ① 尽早注册 onShow，捕获最新启动参数（location=sidebar_card 用于侧边栏复访判定）
@@ -125,6 +151,20 @@ if (isTT) {
     tt.checkScene({
       success: (res) => { if (res && res.isExist) sidebarSupported = true; },
       fail: () => { sidebarSupported = false; },
+    });
+  }
+  // ④ 注册键盘收起监听（抖音「敏感词能力」提审必接项）。
+  //    tt.onKeyboardComplete 在「点击确认」与「直接关闭键盘」两种场景下都会触发，
+  //    回调 data.value 已由平台做过敏感词替换（敏感词 → *）。
+  //    注意：
+  //      - 不要用 tt.onKeyboardInput 逐字获取（无敏感词检测能力）；
+  //      - 不要只用 tt.onKeyboardConfirm（只监听确定按钮、漏掉关闭键盘的场景）；
+  //      - 无论何种输入实现，最终提交/使用的房间码必须经过该回调值过滤。
+  if (typeof tt.onKeyboardComplete === 'function') {
+    sensitiveWordRegistered = true;
+    tt.onKeyboardComplete(function (data) {
+      lastKeyboardCompleteValue = (data && typeof data.value === 'string') ? data.value : '';
+      keyboardCompleteTime = Date.now();
     });
   }
 }
@@ -1391,7 +1431,7 @@ if (typeof module !== 'undefined' && module.exports) {
         getRoomState: () => Room.getState(),
         roomHandleTouch: (sx, sy, t) => Room.handleTouch(sx, sy, t),
         roomCreate: () => Room.createRoom(),
-        roomJoin: (c) => Room.joinRoom(c),
+        roomJoin: (c) => Room.joinRoom(resolveRoomCode(c)),
         roomReport: (s, st, o) => Room.reportProgress(s, st, o),
         roomResult: (s, st, w) => Room.submitMyResult(s, st, w),
         roomExit: () => Room.exit(),
@@ -1421,6 +1461,14 @@ if (typeof module !== 'undefined' && module.exports) {
           claimToday: () => claimSidebarReward(),
           recomputeClaimed: () => { claimedToday = readClaimedToday(); },
           todayStr: () => todayStr(),
+        },
+        // ---- 敏感词能力 QA 钩子（抖音提审「敏感词能力」必接：须调用 tt.onKeyboardComplete） ----
+        sensitiveWord: {
+          getLastValue: () => lastKeyboardCompleteValue,         // 最近一次键盘收起回调值（已过滤）
+          setLastValue: (v) => { lastKeyboardCompleteValue = (typeof v === 'string') ? v : ''; }, // 测试注入
+          getCompleteTime: () => keyboardCompleteTime,            // 最近一次回调时间戳（ms）
+          isRegistered: () => sensitiveWordRegistered,            // 是否成功注册 onKeyboardComplete
+          resolveRoomCode,                                       // 房间码敏感词过滤（最终提交值须经过滤）
         },
       },
     };

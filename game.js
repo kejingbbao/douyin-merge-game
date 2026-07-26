@@ -7,6 +7,15 @@ const HMAC = require('./src/hmac.js'); // 纯 JS HMAC-SHA256（抖音运行时�
 const Ladder = require('./src/ladder.js'); // 天梯（异步匹配）前端客户端 + Canvas UI
 const Room = require('./src/room.js').createRoomClient(); // 房间对战前端客户端 + Canvas UI（Phase 2）
 
+// ---------- 侧边栏复访能力（抖音提审「必接」：未调用 tt.navigateToScene 会被拒审） ----------
+// 状态变量（模块级，供 QA 钩子 game._t.sidebar 读取 / 注入）。
+let latestLaunchOpts = null;   // 最新启动参数（onShow 同步写入；location=sidebar_card 即侧边栏复访）
+let sidebarSupported = false;  // 宿主是否支持侧边栏（tt.checkScene 结果）
+let claimedToday = false;      // 今日是否已领取侧边栏奖励（持久化到 storage）
+let sidebarNavigateCalled = 0; // tt.navigateToScene 调用计数（QA 钩子用）
+let lastNavigateArgs = null;   // 最近一次 tt.navigateToScene 入参（QA 钩子用）
+let memStore = {};             // 内存兜底存储（无 tt.setStorageSync 时使用）
+
 const isTT = typeof tt !== 'undefined' && !!tt.createCanvas;
 let canvas = null;
 let ctx = null;
@@ -29,6 +38,98 @@ if (isTT) {
   ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 }
+
+// ---------- 侧边栏复访能力（抖音提审「必接」）辅助函数 ----------
+function todayStr() {
+  const d = new Date();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + m + '-' + day;
+}
+
+// 读取今日是否已领取侧边栏奖励（持久化 key: sidebar_reward_YYYY-MM-DD）
+function readClaimedToday() {
+  const key = 'sidebar_reward_' + todayStr();
+  try {
+    if (isTT && typeof tt.getStorageSync === 'function') {
+      return tt.getStorageSync(key) === todayStr();
+    }
+  } catch (e) { /* 无存储能力时按未领取处理 */ }
+  // 内存兜底（无 tt 存储 API 时）
+  return !!memStore[key] && memStore[key] === todayStr();
+}
+
+// 写入今日已领取（持久化 + 内存兜底）
+function writeClaimedToday() {
+  const key = 'sidebar_reward_' + todayStr();
+  const val = todayStr();
+  try {
+    if (isTT && typeof tt.setStorageSync === 'function') {
+      tt.setStorageSync({ key: key, data: val });
+    }
+  } catch (e) { /* 写入失败不影响内存标记 */ }
+  memStore[key] = val; // 内存兜底
+}
+
+// 侧边栏奖励入口按钮矩形（右上区域，避开系统胶囊与底部隐私/震动按钮）
+function sidebarEntryBtnRect() {
+  const w = 96, h = 30;
+  return { x: W - 12 - w, y: 56, w: w, h: h };
+}
+
+// 轻量反馈（优先 toast，无 API 时降级 console）
+function showSidebarToast(title) {
+  if (isTT && typeof tt.showToast === 'function') {
+    try { tt.showToast({ title: title, icon: 'none' }); return; } catch (e) { /* noop */ }
+  }
+  console.log('[merge-energy] ' + title);
+}
+
+// 标记今日已领取侧边栏奖励（持久化 + 反馈）
+function claimSidebarReward() {
+  claimedToday = true;
+  writeClaimedToday();
+  showSidebarToast('已领取今日奖励');
+}
+
+// 点击侧边栏奖励入口的复访闭环逻辑
+function sidebarEntryClick() {
+  // 从侧边栏复访启动(location=sidebar_card) → 标记已领取奖励
+  if (latestLaunchOpts && latestLaunchOpts.location === 'sidebar_card') {
+    claimSidebarReward();
+    return;
+  }
+  // 否则跳转侧边栏（自动添加到侧边栏），这是提审硬性门槛 tt.navigateToScene 的调用点
+  sidebarNavigateCalled += 1;
+  lastNavigateArgs = { scene: 'sidebar' };
+  if (typeof tt.navigateToScene === 'function') {
+    tt.navigateToScene({
+      scene: 'sidebar',
+      success: function (r) { console.log('[merge-energy] navigateToScene success', r); },
+      fail: function (e) { console.log('[merge-energy] navigateToScene fail', e); },
+    });
+  }
+}
+
+// 启动即注册 onShow + 检测侧边栏支持 + 读取今日领取状态（同步，避免错过启动参数）
+if (isTT) {
+  // ① 尽早注册 onShow，捕获最新启动参数（location=sidebar_card 用于侧边栏复访判定）
+  if (typeof tt.onShow === 'function') {
+    tt.onShow((opts) => { latestLaunchOpts = opts || null; });
+  } else if (typeof tt.getLaunchOptionsSync === 'function') {
+    // 无 onShow 时退而求其次，读取一次启动参数
+    try { latestLaunchOpts = tt.getLaunchOptionsSync() || null; } catch (e) { /* noop */ }
+  }
+  // ② 检测宿主是否支持侧边栏能力
+  if (typeof tt.checkScene === 'function') {
+    tt.checkScene({
+      success: (res) => { if (res && res.isExist) sidebarSupported = true; },
+      fail: () => { sidebarSupported = false; },
+    });
+  }
+}
+// ③ 读取今日是否已领取侧边栏奖励（持久化兜底）
+claimedToday = readClaimedToday();
 
 const SIZE = Logic.SIZE;
 const PAD = 12;
@@ -743,6 +844,16 @@ tt.onTouchEnd((e) => {
         return;
       }
     }
+    // 侧边栏奖励入口：命中即按"复访闭环"处理（从侧边栏进入→领取；否则→跳侧边栏）
+    {
+      const sb = sidebarEntryBtnRect();
+      if (screen === 'play' && !state.over && sidebarSupported && !claimedToday &&
+          t.clientX >= sb.x && t.clientX <= sb.x + sb.w &&
+          t.clientY >= sb.y && t.clientY <= sb.y + sb.h) {
+        sidebarEntryClick();
+        return;
+      }
+    }
     if (state.over) {
       watchRewardedThenRestart();
       return;
@@ -1112,6 +1223,19 @@ function draw() {
     ctx.fillText('房间', rm.x + rm.w / 2, rm.y + rm.h / 2);
   }
 
+  // 侧边栏奖励入口（右上区域，仅游戏进行中且未领取时显示，引导用户从侧边栏复访）
+  if (screen === 'play' && !state.over && sidebarSupported && !claimedToday) {
+    const sb = sidebarEntryBtnRect();
+    ctx.fillStyle = '#3a7afe';
+    roundRect(sb.x, sb.y, sb.w, sb.h, sb.h / 2);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 13px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('侧边栏有奖', sb.x + sb.w / 2, sb.y + sb.h / 2);
+  }
+
   // 游戏结束遮罩
   if (state.over && screen === 'play') {
     ctx.fillStyle = 'rgba(250,248,239,0.80)';
@@ -1280,6 +1404,24 @@ if (typeof module !== 'undefined' && module.exports) {
           match: ladderMatch, loading: ladderLoading, error: ladderError,
           hist: ladderHist, histLoading: ladderHistLoading, histError: ladderHistError,
         }),
+        // ---- 侧边栏复访能力 QA 钩子 ----
+        sidebar: {
+          latestOpts: () => latestLaunchOpts,
+          setLatestOpts: (o) => { latestLaunchOpts = o; },
+          fromSidebar: () => !!(latestLaunchOpts && latestLaunchOpts.location === 'sidebar_card'),
+          getSupported: () => sidebarSupported,
+          setSupported: (v) => { sidebarSupported = v; },
+          isClaimedToday: () => claimedToday,
+          setClaimedToday: (v) => { claimedToday = v; },
+          showEntry: () => sidebarSupported && !claimedToday,
+          getNavigateCalled: () => sidebarNavigateCalled,
+          getLastNavigateArgs: () => lastNavigateArgs,
+          clickEntry: () => sidebarEntryClick(),
+          entryBtnRect: () => sidebarEntryBtnRect(),
+          claimToday: () => claimSidebarReward(),
+          recomputeClaimed: () => { claimedToday = readClaimedToday(); },
+          todayStr: () => todayStr(),
+        },
       },
     };
 }

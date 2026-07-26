@@ -219,7 +219,12 @@ function loadRank() {
     url: RANK_ENDPOINT + '/rank?uid=' + encodeURIComponent(rankUid) + '&limit=100&ts=' + ts + '&sig=' + encodeURIComponent(sig),
     method: 'GET',
     success: (res) => {
-      if (res && res.data) { rankData = res.data; rankLoading = false; }
+      if (res && res.data) {
+        const payload = typeof res.data === 'string' ? JSON.parse(res.data) : res.data;
+        // 服务端返回 { code:0, data:{ top, selfRank, selfName, selfScore } }，解包内层
+        rankData = payload.data || payload;
+        rankLoading = false;
+      }
       else { rankError = '榜单数据格式异常'; rankLoading = false; }
     },
     fail: () => { rankError = '榜单请求失败，请检查网络或后端地址'; rankLoading = false; },
@@ -428,6 +433,13 @@ function drawRank() {
   }
 
   const view = rankData;
+  // 防御：若数据结构异常（无 .top），降级为空榜单而非崩溃
+  if (!view || !Array.isArray(view.top)) {
+    ctx.fillStyle = '#776e65'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('暂无数据', W / 2, p.y + p.h / 2);
+    return;
+  }
   const listTop = p.y + 56;
   const listBottom = p.y + p.h - 56;
   const rowH = 34;
